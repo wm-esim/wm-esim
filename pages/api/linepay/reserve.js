@@ -1,38 +1,36 @@
+// pages/api/linepay/reserve.js
+
 import crypto from "crypto";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
   const channelId = "2007568484";
   const channelSecret = "cb183f20b331f6c246755708eef99437";
 
-  const { cartItems, totalPrice = 100 } = req.body;
-  const orderId = "ORDER_" + Date.now();
+  const { cartItems, totalPrice = 100 } = req.body; // fallback 為 100 元
+  const orderId = "ORDER_" + Date.now(); // 動態唯一訂單編號
 
-  const products = cartItems.map((item, index) => ({
-    id: item.sku || `sku-${index}`,
-    name: item.name || `商品 ${index + 1}`,
-    quantity: item.quantity || 1,
-    price: Math.round(item.price || 0),
+  // 建立商品清單
+  const products = cartItems.map((item) => ({
+    name: item.name,
+    quantity: item.quantity,
+    price: item.price,
   }));
 
   const body = {
-    amount: Math.round(totalPrice),
+    amount: totalPrice,
     currency: "TWD",
     orderId,
     packages: [
       {
         id: "pkg_" + Date.now(),
-        amount: Math.round(totalPrice),
+        amount: totalPrice,
         name: "汪喵通SIM",
         products,
       },
     ],
     redirectUrls: {
-      confirmUrl: "https://www.wmesim.com/linepay-confirm",
-      cancelUrl: "https://www.wmesim.com/linepay-cancel",
+      confirmUrl: "https://esim-beta.vercel.app/linepay-confirm",
+      cancelUrl: "https://esim-beta.vercel.app/linepay-cancel",
     },
   };
 
@@ -61,7 +59,7 @@ export default async function handler(req, res) {
     const result = await response.json();
     res.status(response.status).json(result);
   } catch (error) {
-    console.error("LINE Pay 請求錯誤:", error);
-    res.status(500).json({ error: "LINE Pay API 請求失敗", detail: error.message });
+    console.error("LINE Pay Request Error:", error);
+    res.status(500).json({ error: "LINE Pay API 請求失敗" });
   }
 }

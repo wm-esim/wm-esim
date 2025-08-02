@@ -37,7 +37,7 @@
   "components/ui/footer.jsx",
   "pages/Layout.js",
   "pages/_app.jsx"
-, "pages/Cart.jsx", "pages/checkout.jsx", "pages/api/create-order.js", "pages/api/newebpay-notify.js", "pages/contact.jsx", "components/CheckoutForm.jsx", "pages/sku-map/page.jsx", "src/utils/ezpay/invoice.ts", "pages/test-callback.js", "test-callback.ts", "tradeinfo.js"]
+, "pages/Cart.jsx", "pages/checkout.jsx", "pages/api/create-order.js", "pages/api/newebpay-notify.js", "pages/contact.jsx", "components/CheckoutForm.jsx", "pages/sku-map/page.jsx", "src/utils/ezpay/invoice.ts", "pages/test-callback.js", "test-callback.ts", "tradeinfo.js", "pages/api/linepay/confirm.ts", "pages/api/linepay/reserve.js"]
 ,
   "exclude": ["node_modules"]
 }
