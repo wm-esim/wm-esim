@@ -8,7 +8,7 @@ export default function LinePayConfirmPage() {
 
   useEffect(() => {
     if (transactionId && orderId) {
-      fetch("/api/linepay/confirm-callback.ts", {
+      fetch("/api/linepay/confirm-callback", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ transactionId, orderId }),
