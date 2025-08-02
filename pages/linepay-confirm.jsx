@@ -1,15 +1,21 @@
+"use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 
 export default function LinePayConfirmPage() {
   const router = useRouter();
-  const { transactionId, amount, orderId } = router.query;
-
   const [status, setStatus] = useState("確認付款中...");
   const [processing, setProcessing] = useState(false);
 
   useEffect(() => {
-    if (!router.isReady || !transactionId || !amount || processing) return;
+    if (!router.isReady || processing) return;
+
+    const { transactionId, amount, orderId } = router.query;
+
+    if (!transactionId || !amount) {
+      setStatus("❌ 缺少付款資訊");
+      return;
+    }
 
     const confirmAndCallback = async () => {
       setProcessing(true);
@@ -58,8 +64,9 @@ export default function LinePayConfirmPage() {
 
           if (callbackRes.ok) {
             setStatus("🎉 訂單完成，eSIM 與發票已寄出！");
-            // router.push("/thank-you") 如需跳轉
+            // 可加 router.push("/thank-you")
           } else {
+            console.error("❗ callback error:", callbackResult);
             setStatus("⚠️ 訂單已付款，但處理失敗：" + callbackResult.message);
           }
         } else {
@@ -72,7 +79,7 @@ export default function LinePayConfirmPage() {
     };
 
     confirmAndCallback();
-  }, [router.isReady, transactionId, amount, orderId]);
+  }, [router.isReady, processing]);
 
   return (
     <div className="p-10 text-center text-xl whitespace-pre-line">{status}</div>
