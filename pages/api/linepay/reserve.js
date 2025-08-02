@@ -1,35 +1,35 @@
-// pages/api/linepay/reserve.js
-
 import crypto from "crypto";
 
 export default async function handler(req, res) {
   const channelId = "2007568484";
   const channelSecret = "cb183f20b331f6c246755708eef99437";
 
-  const { cartItems, totalPrice = 100 } = req.body; // fallback 為 100 元
-  const orderId = "ORDER_" + Date.now(); // 動態唯一訂單編號
+  const { cartItems, totalPrice = 100 } = req.body;
+  const orderId = "ORDER_" + Date.now();
 
   // 建立商品清單
-  const products = cartItems.map((item) => ({
-    name: item.name,
-    quantity: item.quantity,
-    price: item.price,
+  const products = cartItems.map((item, index) => ({
+    id: item.sku || `sku-${index}`,
+    name: item.name || `商品 ${index + 1}`,
+    quantity: item.quantity || 1,
+    price: Math.round(item.price || 0),
   }));
 
   const body = {
-    amount: totalPrice,
+    amount: Math.round(totalPrice),
     currency: "TWD",
     orderId,
     packages: [
       {
         id: "pkg_" + Date.now(),
-        amount: totalPrice,
+        amount: Math.round(totalPrice),
         name: "汪喵通SIM",
         products,
       },
     ],
     redirectUrls: {
-      confirmUrl: "https://www.wmesim.com/linepay-confirm",
+      // ✅ 加上 amount 和 orderId 參數，供 linepay-confirm 頁面使用
+      confirmUrl: `https://www.wmesim.com/linepay-confirm?orderId=${orderId}&amount=${totalPrice}`,
       cancelUrl: "https://www.wmesim.com/linepay-cancel",
     },
   };
@@ -45,7 +45,7 @@ export default async function handler(req, res) {
     .digest("base64");
 
   try {
-    const response = await fetch("https://api-pay.line.me/v3/payments/request", {
+    const response = await fetch(`https://api-pay.line.me${uri}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -57,9 +57,12 @@ export default async function handler(req, res) {
     });
 
     const result = await response.json();
-    res.status(response.status).json(result);
+    console.log("✅ LINE Pay 預約結果：", result);
+
+    // 可以把 orderId 傳給前端用於後續處理（如查詢訂單）
+    res.status(response.status).json({ ...result, orderId });
   } catch (error) {
-    console.error("LINE Pay Request Error:", error);
-    res.status(500).json({ error: "LINE Pay API 請求失敗" });
+    console.error("❌ LINE Pay Request Error:", error);
+    res.status(500).json({ error: "LINE Pay API 請求失敗", detail: error.message });
   }
 }
