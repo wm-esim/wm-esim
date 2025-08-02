@@ -1,4 +1,3 @@
-// pages/linepay-confirm.tsx
 import { useEffect } from "react";
 import { useRouter } from "next/router";
 
@@ -16,13 +15,13 @@ export default function LinePayConfirmPage() {
         .then((res) => res.json())
         .then((data) => {
           if (data.success) {
-            router.push("/thank-you"); // ✅ 成功跳轉
+            router.push(`/thankyou?orderNo=${orderId}`);
           } else {
-            router.push("/fail"); // ❌ 錯誤跳轉
+            router.push("/linepay-cancel");
           }
         })
         .catch(() => {
-          router.push("/fail");
+          router.push("/linepay-cancel");
         });
     }
   }, [transactionId, orderId]);
