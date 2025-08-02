@@ -52,8 +52,8 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-      user: "bob112722761236tom@gmail.com",
-      pass: "rssquvzuytrwemaj",
+   user: "wandmesim@gmail.com",
+      pass: "hwoywmluqvsuluss",
     },
   });
 
