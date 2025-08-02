@@ -52,7 +52,7 @@ const RegisterForm = ({ onSuccess }) => {
       {/* ✅ 彈出式成功提示 */}
       {showSuccessPopup && (
         <div className="absolute top-[-50px] left-1/2 transform -translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded shadow-lg z-50">
-          🎉 註冊成功！
+          註冊成功！
         </div>
       )}
 
@@ -100,7 +100,7 @@ const RegisterForm = ({ onSuccess }) => {
       {/* ✅ 成功訊息顯示 */}
       {isRegistered && (
         <p className="text-sm text-center text-green-600 mt-4">
-          ✅ 已成功註冊會員，請登入會員
+          已成功註冊會員，請登入會員
         </p>
       )}
     </div>
