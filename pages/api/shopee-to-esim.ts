@@ -15,7 +15,6 @@ async function sendEsimEmail(to: string, orderNo: string, html: string) {
     auth: {
       user: "bob112722761236tom@gmail.com",
       pass: "rssquvzuytrwemaj",
-      
     },
   });
 
@@ -42,8 +41,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
 
     const order = orders.find((o: any) =>
-      o.meta_data?.some((m: any) => m.key === "shopee_order_no" && m.value === shopee_order_no)
+      o.meta_data?.some((m: any) =>
+        m.key === "shopee_order_no" &&
+        typeof m.value === "string" &&
+        m.value.trim().toUpperCase() === shopee_order_no.trim().toUpperCase()
+      )
     );
+
     if (!order) return res.status(404).json({ error: "找不到該訂單" });
 
     const orderId = order.id;
@@ -52,7 +56,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
     });
 
-    if (fullOrder.status === "completed") {
+    const alreadyRedeemed = fullOrder.meta_data?.some(
+      (m: any) => m.key === "esim_qrcode_redeemed" && m.value === "yes"
+    );
+
+    if (alreadyRedeemed) {
       return res.status(200).json({
         success: false,
         message: "此訂單已完成兌換，請勿重複提交。",
@@ -80,7 +88,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         ? esim.qrcode.map(String)
         : [String(esim.qrcode)];
 
-      // ✅ 建立圖片區塊，每張附帶序號
       const qrcodeHtmlList = imageList.map((src, idx) => {
         const imgTag = src.startsWith("http")
           ? `<img src="${src}" style="max-width:300px" />`
@@ -90,7 +97,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       htmlList.push(qrcodeHtmlList.join("<br/>"));
 
-      // ✅ 寫入 meta_data（每個 SKU 獨立 key）
+      // 寫入每個 SKU 對應的 QRCode meta
       await axios.put(
         `${WC_API_URL}/${orderId}`,
         {
@@ -102,7 +109,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
       );
 
-      // ✅ 寫入備註
+      // 寫入訂單備註（顯示 QRCode）
       await axios.post(
         `${WC_API_URL}/${orderId}/notes`,
         {
@@ -113,13 +120,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       );
     }
 
-    // ✅ 發送 Email
+    // 發送 Email
     await sendEsimEmail(customerEmail, shopee_order_no, htmlList.join("<hr/>"));
 
-    // ✅ 更新訂單狀態為完成
+    // ✅ 更新訂單為已完成，並寫入兌換紀錄
     await axios.put(
       `${WC_API_URL}/${orderId}`,
-      { status: "completed" },
+      {
+        status: "completed",
+        meta_data: [
+          { key: "esim_qrcode_redeemed", value: "yes" },
+        ],
+      },
       { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
     );
 
