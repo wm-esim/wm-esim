@@ -23,13 +23,13 @@ export default async function handler(req, res) {
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-      user: "你的寄件 Gmail",
-      pass: "應用程式密碼",
+      user: "wandmesim@gmail.com",
+      pass: "hwoywmluqvsuluss",
     },
   });
 
   await transporter.sendMail({
-    from: `"eSIM 註冊驗證" <你的寄件 Gmail>`,
+    from: `"eSIM 註冊驗證" <wandmesim@gmail.com>`,
     to: email,
     subject: "您的驗證碼",
     html: `<p>您的驗證碼是：<strong>${code}</strong></p><p>10 分鐘內有效</p>`,
