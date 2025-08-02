@@ -14,7 +14,7 @@ const CONSUMER_KEY = "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04";
 const CONSUMER_SECRET = "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947";
 
 // eSIM Proxy API
-const ESIM_PROXY_URL = "https://esim-beta.vercel.app/api/esim/qrcode";
+const ESIM_PROXY_URL = "https://www.wmesim.com/api/esim/qrcode";
 
 // ezPay 發票設定
 const INVOICE_API_URL = "https://inv.ezpay.com.tw/Api/invoice_issue";
