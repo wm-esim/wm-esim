@@ -29,8 +29,8 @@ export default async function handler(req, res) {
       },
     ],
     redirectUrls: {
-      confirmUrl: "https://www.wmesim.com/linepay-confirm",
-      cancelUrl: "https://www.wmesim.com/linepay-cancel",
+      confirmUrl: "https://esim-beta.vercel.app/linepay-confirm",
+      cancelUrl: "https://esim-beta.vercel.app/linepay-cancel",
     },
   };
 
