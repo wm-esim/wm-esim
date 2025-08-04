@@ -6,13 +6,16 @@ const MERCHANT_ID = "MS3788816305";
 const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
 const HASH_IV = "PKetlaZYZcZvlMmC";
 
-const WOOCOMMERCE_API_URL =
-  "https://fegoesim.com/wp-json/wc/v3/orders";
+const WOOCOMMERCE_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
 const CONSUMER_KEY = "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04";
 const CONSUMER_SECRET = "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947";
 
 function aesEncrypt(data: string, key: string, iv: string) {
-  const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  const cipher = crypto.createCipheriv(
+    "aes-256-cbc",
+    Buffer.from(key, "utf8"),
+    Buffer.from(iv, "utf8")
+  );
   let encrypted = cipher.update(data, "utf8", "hex");
   encrypted += cipher.final("hex");
   return encrypted;
@@ -26,26 +29,28 @@ function shaEncrypt(encryptedText: string, key: string, iv: string) {
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
-  const { items, orderInfo } = req.body;
- // 🔍 加在這裡
+const { items, orderInfo } = req.body;
+const discount = Number(orderInfo?.discount) || 0;
+
   console.log("🛒 items:", items);
   console.log("🧾 orderInfo:", orderInfo);
-  const amount = Math.round(
-    items.reduce((total: number, item: any) => {
-      return total + Number(item.price) * Number(item.quantity);
-    }, 0)
-  );
+  console.log("💸 discount:", discount);
+
+  const rawAmount = items.reduce((total: number, item: any) => {
+    return total + Number(item.price) * Number(item.quantity);
+  }, 0);
+
+  const amount = Math.max(Math.round(rawAmount - Number(discount)), 0); // 不允許負值
+
 
   const orderNo = `ORDER${Date.now()}`;
 
- try {
-
-
-const wooPayload = {
+  try {
+    const wooPayload = {
   payment_method: "newebpay",
   payment_method_title: "藍新金流",
   set_paid: false,
-  customer_id: orderInfo.customerId, // ✅ 綁定 WooCommerce 會員 ID
+  customer_id: orderInfo.customerId || 0,
   billing: {
     first_name: orderInfo.name,
     email: orderInfo.email,
@@ -55,9 +60,8 @@ const wooPayload = {
     const lineItem: any = {
       product_id: item.id,
       quantity: item.quantity,
-      total: (item.price * item.quantity).toString(),
       meta_data: [],
-      ...(item.variation_id && { variation_id: item.variation_id }), // ✅ 條件合併
+      ...(item.variation_id && { variation_id: item.variation_id }),
     };
 
     if (item.planId) {
@@ -69,32 +73,39 @@ const wooPayload = {
 
     return lineItem;
   }),
+  coupon_lines: orderInfo.couponCode
+    ? [
+        {
+          code: orderInfo.couponCode, // ✅ 這一行會觸發 WooCommerce 自動套用優惠券邏輯
+        },
+      ]
+    : [],
   meta_data: [
-    {
-      key: "newebpay_order_no",
-      value: orderNo,
-    },
+    { key: "newebpay_order_no", value: orderNo },
+    { key: "discount_amount", value: discount },
+    ...(orderInfo.couponCode
+      ? [{ key: "coupon_code", value: orderInfo.couponCode }]
+      : []),
   ],
 };
 
 
-  console.log("📦 即將傳送至 WooCommerce 的訂單資料：", JSON.stringify(wooPayload, null, 2));
+    console.log("📦 即將傳送至 WooCommerce 的訂單資料：", JSON.stringify(wooPayload, null, 2));
 
-  const wcRes = await axios.post(WOOCOMMERCE_API_URL, wooPayload, {
-    auth: {
-      username: CONSUMER_KEY,
-      password: CONSUMER_SECRET,
-    },
-  });
+    const wcRes = await axios.post(WOOCOMMERCE_API_URL, wooPayload, {
+      auth: {
+        username: CONSUMER_KEY,
+        password: CONSUMER_SECRET,
+      },
+    });
 
-  console.log("✅ WooCommerce 訂單建立成功：", wcRes.data);
-} catch (err) {
-  const error = err as AxiosError;
-  const details = error.response?.data || error.message || error;
-  console.error("❌ WooCommerce 訂單建立失敗：", details);
-  return res.status(500).json({ error: "WooCommerce 訂單建立失敗", details });
-}
-
+    console.log("✅ WooCommerce 訂單建立成功：", wcRes.data);
+  } catch (err) {
+    const error = err as AxiosError;
+    const details = error.response?.data || error.message || error;
+    console.error("❌ WooCommerce 訂單建立失敗：", details);
+    return res.status(500).json({ error: "WooCommerce 訂單建立失敗", details });
+  }
 
   // ✅ 建立藍新付款參數
   const tradeInfoObj = {

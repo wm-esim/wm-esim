@@ -4,7 +4,7 @@ import React, { useState, useEffect } from "react";
 import { useCart } from "../components/context/CartContext";
 import Image from "next/image";
 import { motion } from "framer-motion";
-import PLAN_ID_MAP from "../lib/esim/planMap"; // 根據實際路徑調整
+import PLAN_ID_MAP from "../lib/esim/planMap";
 
 const CheckoutPage = ({ onBack, onNext }) => {
   const { cartItems, totalPrice, removeFromCart, updateQuantity } = useCart();
@@ -18,19 +18,20 @@ const CheckoutPage = ({ onBack, onNext }) => {
     storeInfo: null,
   });
 
+  const [couponCode, setCouponCode] = useState("");
+  const [discount, setDiscount] = useState(0);
+  const [couponApplied, setCouponApplied] = useState(false);
   const [memberInfo, setMemberInfo] = useState(null);
   const [useMemberInfo, setUseMemberInfo] = useState(false);
+
+  const finalTotal = Math.max(totalPrice - discount, 0);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const storeData = localStorage.getItem("ecpay_cvs_store");
       if (storeData) {
-        setFormData((prev) => ({
-          ...prev,
-          storeInfo: JSON.parse(storeData),
-        }));
+        setFormData((prev) => ({ ...prev, storeInfo: JSON.parse(storeData) }));
       }
-
       const savedUser = localStorage.getItem("user");
       if (savedUser) {
         setMemberInfo(JSON.parse(savedUser));
@@ -43,47 +44,52 @@ const CheckoutPage = ({ onBack, onNext }) => {
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
+  const handleApplyCoupon = async () => {
+    if (!couponCode) return;
+
+    try {
+      const res = await fetch(
+        `/api/validate-coupon?code=${couponCode.toLowerCase()}`
+      );
+      const data = await res.json();
+
+      if (data.valid) {
+        setDiscount(data.amount);
+        setCouponApplied(true);
+      } else {
+        alert(data.message || "優惠碼無效");
+        setDiscount(0);
+        setCouponApplied(false);
+      }
+    } catch (err) {
+      console.error("❌ 驗證失敗", err);
+      alert("套用優惠碼時發生錯誤");
+      setDiscount(0);
+      setCouponApplied(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-
     if (!formData.name || !formData.email || !formData.phone) {
       alert("請填寫所有必填欄位");
       return;
     }
-
     if (cartItems.length === 0) {
       alert("購物車為空，無法結帳");
       return;
     }
-
     const newWindow = window.open("about:blank");
-
     try {
       const enrichedItems = cartItems.map((item) => {
         const cleanedSku = item.sku
           ?.trim()
-          .replace(/\u200B/g, "") // 移除 Zero-Width Space
-          .replace(/,/g, "-") // 逗號改為 -
-          .replace(/\s+/g, "-") // 空格改為 -
-          .replace(/-+/g, "-"); // 多個 - 合併成一個
-
+          .replace(/\u200B/g, "")
+          .replace(/,/g, "-")
+          .replace(/\s+/g, "-")
+          .replace(/-+/g, "-");
         const resolvedPlanId = item.planId || PLAN_ID_MAP[cleanedSku];
-
-        console.log("🛒 商品名稱:", item.name);
-        console.log("🔍 SKU:", cleanedSku);
-        console.log("✅ planId:", resolvedPlanId);
-
-        if (!resolvedPlanId) {
-          console.warn(
-            "⚠️ 無法對應 planId，請確認 SKU 是否與 planMap 對上",
-            item
-          );
-        }
-
-        return {
-          ...item,
-          planId: resolvedPlanId,
-        };
+        return { ...item, planId: resolvedPlanId };
       });
 
       const res = await fetch("/api/newebpay-generate-form", {
@@ -91,9 +97,12 @@ const CheckoutPage = ({ onBack, onNext }) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           items: enrichedItems,
+          totalPrice: finalTotal,
           orderInfo: {
             ...formData,
             customerId: memberInfo?.id || 0,
+            couponCode,
+            discount,
           },
         }),
       });
@@ -101,7 +110,6 @@ const CheckoutPage = ({ onBack, onNext }) => {
       const html = await res.text();
       newWindow.document.write(html);
       newWindow.document.close();
-
       if (onNext) onNext();
     } catch (err) {
       console.error("❌ 建立訂單失敗", err);
@@ -115,12 +123,10 @@ const CheckoutPage = ({ onBack, onNext }) => {
       alert("請填寫所有必填欄位");
       return;
     }
-
     if (cartItems.length === 0) {
       alert("購物車為空，無法結帳");
       return;
     }
-
     try {
       const enrichedItems = cartItems.map((item) => {
         const cleanedSku = item.sku
@@ -129,17 +135,8 @@ const CheckoutPage = ({ onBack, onNext }) => {
           .replace(/,/g, "-")
           .replace(/\s+/g, "-")
           .replace(/-+/g, "-");
-
         const resolvedPlanId = item.planId || PLAN_ID_MAP[cleanedSku];
-
-        if (!resolvedPlanId) {
-          console.warn("⚠️ 缺少 planId，請確認商品 SKU 與對照表一致", item);
-        }
-
-        return {
-          ...item,
-          planId: resolvedPlanId,
-        };
+        return { ...item, planId: resolvedPlanId };
       });
 
       const res = await fetch("/api/linepay/reserve", {
@@ -148,7 +145,9 @@ const CheckoutPage = ({ onBack, onNext }) => {
         body: JSON.stringify({
           orderInfo: formData,
           cartItems: enrichedItems,
-          totalPrice,
+          totalPrice: finalTotal,
+          couponCode,
+          discount,
         }),
       });
 
@@ -178,11 +177,9 @@ const CheckoutPage = ({ onBack, onNext }) => {
           onSubmit={handleSubmit}
           className="flex flex-col lg:flex-row max-w-7xl w-full my-[70px] mx-auto"
         >
-          {/* 左側：填寫表單 */}
           <div className="w-full lg:w-1/2 flex justify-center bg-white p-5 sm:p-10 m-2 flex-col">
             <div className="max-w-[500px] flex flex-col mx-auto items-center">
               <h2 className="text-xl font-bold mb-4">結帳資訊</h2>
-
               <div className="flex items-center w-full mb-4">
                 <input
                   type="checkbox"
@@ -206,7 +203,6 @@ const CheckoutPage = ({ onBack, onNext }) => {
                   同會員資料自動填入
                 </label>
               </div>
-
               <input
                 name="name"
                 value={formData.name}
@@ -231,16 +227,33 @@ const CheckoutPage = ({ onBack, onNext }) => {
                 className="border p-2 w-full border-gray-300 rounded-[13px] mb-2"
                 required
               />
-              <div className="mt-2">
-                <span className="text-[14px] text-gray-600">
-                  備註：請填入正確的 Email，此 Email 會拿來當作發送 QR CODE
-                  兌換的依據
-                </span>
+              <div className="flex w-full mb-2">
+                <input
+                  value={couponCode}
+                  onChange={(e) => setCouponCode(e.target.value)}
+                  placeholder="折扣碼（選填）"
+                  className="border p-2 w-full border-gray-300 rounded-l-[13px]"
+                />
+                <button
+                  type="button"
+                  onClick={handleApplyCoupon}
+                  className="bg-gray-800 text-white px-4 rounded-r-[13px]"
+                >
+                  套用
+                </button>
+              </div>
+              {couponApplied && (
+                <p className="text-green-600 mb-2">
+                  已套用優惠碼，折扣 ${discount}
+                </p>
+              )}
+              <div className="mt-2 text-[14px] text-gray-600">
+                備註：請填入正確的 Email，此 Email 會拿來當作發送 QR CODE
+                兌換的依據
               </div>
             </div>
           </div>
 
-          {/* 右側：購物車與付款 */}
           <div className="w-full lg:w-1/2 m-2 p-10 bg-white">
             <div className="border-t pt-6">
               <h3 className="text-lg font-semibold text-gray-900 mb-4">
@@ -302,6 +315,12 @@ const CheckoutPage = ({ onBack, onNext }) => {
                 </ul>
               )}
               <p className="text-right font-bold mt-4">總金額：${totalPrice}</p>
+              {discount > 0 && (
+                <p className="text-right text-green-600">折扣：-${discount}</p>
+              )}
+              <p className="text-right text-xl font-bold mt-2">
+                優惠後總金額：${finalTotal}
+              </p>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-4 mt-6">
