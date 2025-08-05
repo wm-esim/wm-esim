@@ -52,7 +52,7 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-      user: "wandmesim@gmail.com",
+   user: "wandmesim@gmail.com",
       pass: "hwoywmluqvsuluss",
     },
   });
@@ -74,10 +74,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const { TradeInfo } = req.body;
   try {
     const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
+    console.log("🔓 解密後 TradeInfo：", decrypted);
     const result = JSON.parse(decrypted).Result;
     const orderNumber = result?.MerchantOrderNo;
 
     if (!result || result.Status === "FAILED") {
+      console.warn("⚠️ 非成功交易：", result);
       res.redirect(302, `/thank-you?status=fail&orderNo=${orderNumber || ""}`);
       return;
     }
@@ -89,6 +91,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const order = orders.find((o: any) => o.meta_data?.some((m: any) => m.key === "newebpay_order_no" && m.value === orderNumber));
     if (!order) {
+      console.error("❌ 找不到 WooCommerce 訂單，編號：", orderNumber);
       res.redirect(302, `/thank-you?status=notfound&orderNo=${orderNumber}`);
       return;
     }
@@ -102,7 +105,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return planId ? [{ planId, quantity: item.quantity || 1 }] : [];
     });
 
+    if (planIdsWithQty.length === 0) throw new Error("❌ 無法從訂單抓取 esim_plan_id");
+
     const allImagesHtml: string[] = [];
+
     for (const { planId, quantity } of planIdsWithQty) {
       const resolvedPlanId = PLAN_ID_MAP[planId] || planId;
       const { data: esim } = await axios.post(ESIM_PROXY_URL, { channel_dataplan_id: resolvedPlanId, number: quantity });
@@ -129,113 +135,99 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
     }
 
-    if (order.billing?.email) {
-      await sendEsimEmail(order.billing.email, orderNumber, allImagesHtml.join("<br /><hr><br />"));
-    }
+    const customerEmail: string = order.billing?.email;
+    if (customerEmail) await sendEsimEmail(customerEmail, orderNumber, allImagesHtml.join("<br /><hr><br />"));
 
-    // === 發票欄位準備（方法一：平均分配折扣後金額） ===
+    // === 發票欄位準備 ===
     const buyerName = `${order.billing?.first_name || ""}${order.billing?.last_name || ""}` || "網路訂單";
     const buyerEmail = order.billing?.email || "test@example.com";
     const timeStamp = Math.floor(Date.now() / 1000).toString();
-    const totalAmt = Math.round(Number(result.Amt));
-    const taxRate = 5;
-    const taxAmount = Math.round(totalAmt * (taxRate / (100 + taxRate)));
-    const amountWithoutTax = totalAmt - taxAmount;
+    const amt = Math.round(Number(result.Amt));
 
-    const items = order.line_items;
-    const totalQty = items.reduce((sum: number, item: any) => sum + item.quantity, 0);
-    const avgUnitPrice = Math.floor(amountWithoutTax / totalQty);
-    const remainder = amountWithoutTax - avgUnitPrice * totalQty;
+    const itemNames = order.line_items.map((item: any) => item.name).join("|");
+    const itemCounts = order.line_items.map((item: any) => item.quantity).join("|");
+    const itemPrices = order.line_items.map((item: any) => String(Math.round(Number(item.total) / item.quantity))).join("|");
+    const itemAmts = order.line_items.map((item: any) => item.total).join("|");
+    const itemUnits = order.line_items.map(() => "項").join("|"); // ✅ 修正：每個商品對應一個單位
 
-    const itemNames: string[] = [];
-    const itemCounts: string[] = [];
-    const itemUnits: string[] = [];
-    const itemPrices: string[] = [];
-    const itemAmts: string[] = [];
+    try {
+      const invoiceData: Record<string, any> = {
+        RespondType: "JSON",
+        Version: "1.5",
+        TimeStamp: timeStamp,
+        MerchantID: INVOICE_MERCHANT_ID,
+        MerchantOrderNo: result.MerchantOrderNo || "unknown",
+        Status: "1",
+        Category: "B2C",
+        BuyerName: buyerName,
+        BuyerEmail: buyerEmail,
+        PrintFlag: "Y",
+        CarrierType: "",
+        CarrierNum: "",
+        Donation: "0",
+        LoveCode: "",
+        TaxType: "1",
+        TaxRate: 5,
+        Amt: amt,
+        TaxAmt: 0,
+        TotalAmt: amt,
+        ItemName: itemNames,
+        ItemCount: itemCounts,
+        ItemUnit: itemUnits,
+        ItemPrice: itemPrices,
+        ItemAmt: itemAmts,
+        Comment: "感謝您的訂購",
+      };
 
-    let distributed = 0;
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const qty = item.quantity;
-      let unitPrice = avgUnitPrice;
-      let itemTotal = unitPrice * qty;
-      if (i === items.length - 1) itemTotal += remainder;
-      itemNames.push(item.name);
-      itemCounts.push(String(qty));
-      itemUnits.push("項");
-      itemPrices.push(String(unitPrice));
-      itemAmts.push(String(itemTotal));
-      distributed += itemTotal;
+      invoiceData.CheckCode = genCheckCode({
+        MerchantID: invoiceData.MerchantID,
+        MerchantOrderNo: invoiceData.MerchantOrderNo,
+        Amt: String(invoiceData.Amt),
+        TimeStamp: invoiceData.TimeStamp,
+      });
+
+      console.log("🧾 發票送出資料：", invoiceData);
+
+      const encryptedPostData = encryptPostData(invoiceData);
+      const invoiceRes = await axios.post(INVOICE_API_URL, qs.stringify({
+        MerchantID_: INVOICE_MERCHANT_ID,
+        PostData_: encryptedPostData,
+      }), {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
+
+      console.log("📄 發票回傳原始資料：", invoiceRes.data);
+
+      if (invoiceRes.data.Status !== "SUCCESS") {
+        throw new Error(`發票開立失敗：${invoiceRes.data.Message || "未知錯誤"} (${invoiceRes.data.Status})`);
+      }
+
+      const invoiceJson = JSON.parse(invoiceRes.data.Result);
+
+      await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, {
+        note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
+        customer_note: false,
+      }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
+
+      await axios.put(`${WOOCOMMERCE_API_URL}/${orderId}`, {
+        meta_data: [
+          { key: "invoice_number", value: invoiceJson.InvoiceNumber },
+          { key: "invoice_random", value: invoiceJson.RandomNum },
+          { key: "invoice_qrcode_l", value: invoiceJson.QRcodeL },
+          { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
+        ],
+      }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
+    } catch (invoiceErr: any) {
+      console.error("❌ 發票開立失敗：", invoiceErr?.response?.data || invoiceErr.message);
+      await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, {
+        note: `❌ 發票開立失敗：${invoiceErr?.message}`,
+        customer_note: false,
+      }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
     }
-
-    const invoiceData: Record<string, any> = {
-      RespondType: "JSON",
-      Version: "1.5",
-      TimeStamp: timeStamp,
-      MerchantID: INVOICE_MERCHANT_ID,
-      MerchantOrderNo: result.MerchantOrderNo || "unknown",
-      Status: "1",
-      Category: "B2C",
-      BuyerName: buyerName,
-      BuyerEmail: buyerEmail,
-      PrintFlag: "Y",
-      CarrierType: "",
-      CarrierNum: "",
-      Donation: "0",
-      LoveCode: "",
-      TaxType: "1",
-      TaxRate: taxRate,
-      Amt: amountWithoutTax,
-      TaxAmt: taxAmount,
-      TotalAmt: totalAmt,
-      ItemName: itemNames.join("|"),
-      ItemCount: itemCounts.join("|"),
-      ItemUnit: itemUnits.join("|"),
-      ItemPrice: itemPrices.join("|"),
-      ItemAmt: itemAmts.join("|"),
-      Comment: "感謝您的訂購",
-    };
-
-    invoiceData.CheckCode = genCheckCode({
-      MerchantID: invoiceData.MerchantID,
-      MerchantOrderNo: invoiceData.MerchantOrderNo,
-      Amt: String(invoiceData.Amt),
-      TimeStamp: invoiceData.TimeStamp,
-    });
-
-    const encryptedPostData = encryptPostData(invoiceData);
-    const invoiceRes = await axios.post(INVOICE_API_URL, qs.stringify({
-      MerchantID_: INVOICE_MERCHANT_ID,
-      PostData_: encryptedPostData,
-    }), {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
-
-    if (invoiceRes.data.Status !== "SUCCESS") {
-      throw new Error(`發票開立失敗：${invoiceRes.data.Message || "未知錯誤"} (${invoiceRes.data.Status})`);
-    }
-
-    const invoiceJson = JSON.parse(invoiceRes.data.Result);
-
-    await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, {
-      note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
-      customer_note: false,
-    }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
-
-    await axios.put(`${WOOCOMMERCE_API_URL}/${orderId}`, {
-      meta_data: [
-        { key: "invoice_number", value: invoiceJson.InvoiceNumber },
-        { key: "invoice_random", value: invoiceJson.RandomNum },
-        { key: "invoice_qrcode_l", value: invoiceJson.QRcodeL },
-        { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
-      ],
-    }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
 
     res.redirect(302, `/thank-you?status=success&orderNo=${orderNumber}`);
-    return;
   } catch (error: any) {
     console.error("❌ Callback 錯誤：", error?.response?.data || error.message);
     res.redirect(302, `/thank-you?status=error`);
-    return;
   }
 }
