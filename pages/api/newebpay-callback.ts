@@ -1,25 +1,28 @@
-
-
 import type { NextApiRequest, NextApiResponse } from "next";
 import crypto from "crypto";
 import axios from "axios";
 import nodemailer from "nodemailer";
 import qs from "qs";
 
+// 藍新金流金鑰
 const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
 const HASH_IV = "PKetlaZYZcZvlMmC";
 
+// WooCommerce API
 const WOOCOMMERCE_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
 const CONSUMER_KEY = "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04";
 const CONSUMER_SECRET = "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947";
 
+// eSIM Proxy API
 const ESIM_PROXY_URL = "https://www.wmesim.com/api/esim/qrcode";
 
+// ezPay 發票設定
 const INVOICE_API_URL = "https://inv.ezpay.com.tw/Api/invoice_issue";
 const INVOICE_MERCHANT_ID = "345049107";
 const INVOICE_HASH_KEY = "FnDByoo3m9U4nVi29UciIbAHVQRQogHG";
 const INVOICE_HASH_IV = "PtgsjF33nlm8q2kC";
 
+// SKU 對照表
 const PLAN_ID_MAP: Record<string, string> = {
   "Malaysia-Daily500MB-1-A0": "90ab730c-b369-4144-a6f5-be4376494791",
 };
@@ -49,7 +52,7 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-      user: "wandmesim@gmail.com",
+   user: "wandmesim@gmail.com",
       pass: "hwoywmluqvsuluss",
     },
   });
@@ -58,7 +61,7 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
     from: `eSIM 團隊 <bob112722761236tom@gmail.com>`,
     to,
     subject: `訂單 ${orderNumber} 的 eSIM QRCode`,
-    html: `<p>您好，感謝您的購買！以下是您的 eSIM QRCode 與發票資訊：</p><p>${imagesHtml}</p>`
+    html: `<p>您好，感謝您的購買！以下是您的 eSIM QRCode：</p><p>${imagesHtml}</p>`
   });
 }
 
@@ -71,12 +74,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const { TradeInfo } = req.body;
   try {
     const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
-    console.log("\ud83d\udd13 解密後 TradeInfo：", decrypted);
+    console.log("🔓 解密後 TradeInfo：", decrypted);
     const result = JSON.parse(decrypted).Result;
     const orderNumber = result?.MerchantOrderNo;
 
     if (!result || result.Status === "FAILED") {
-      console.warn("\u26a0\ufe0f 非成功交易：", result);
+      console.warn("⚠️ 非成功交易：", result);
       res.redirect(302, `/thank-you?status=fail&orderNo=${orderNumber || ""}`);
       return;
     }
@@ -88,7 +91,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const order = orders.find((o: any) => o.meta_data?.some((m: any) => m.key === "newebpay_order_no" && m.value === orderNumber));
     if (!order) {
-      console.error("\u274c 找不到 WooCommerce 訂單，編號：", orderNumber);
+      console.error("❌ 找不到 WooCommerce 訂單，編號：", orderNumber);
       res.redirect(302, `/thank-you?status=notfound&orderNo=${orderNumber}`);
       return;
     }
@@ -102,7 +105,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return planId ? [{ planId, quantity: item.quantity || 1 }] : [];
     });
 
-    if (planIdsWithQty.length === 0) throw new Error("\u274c 無法從訂單抓取 esim_plan_id");
+    if (planIdsWithQty.length === 0) throw new Error("❌ 無法從訂單抓取 esim_plan_id");
 
     const allImagesHtml: string[] = [];
 
@@ -133,7 +136,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const customerEmail: string = order.billing?.email;
+    if (customerEmail) await sendEsimEmail(customerEmail, orderNumber, allImagesHtml.join("<br /><hr><br />"));
 
+    // === 發票欄位準備 ===
     const buyerName = `${order.billing?.first_name || ""}${order.billing?.last_name || ""}` || "網路訂單";
     const buyerEmail = order.billing?.email || "test@example.com";
     const timeStamp = Math.floor(Date.now() / 1000).toString();
@@ -143,36 +148,37 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const itemCounts = order.line_items.map((item: any) => item.quantity).join("|");
     const itemPrices = order.line_items.map((item: any) => String(Math.round(Number(item.total) / item.quantity))).join("|");
     const itemAmts = order.line_items.map((item: any) => item.total).join("|");
-    const itemUnits = order.line_items.map(() => "項").join("|");
+    const itemUnits = order.line_items.map(() => "項").join("|"); // ✅ 修正：每個商品對應一個單位
 
     try {
       const invoiceData: Record<string, any> = {
-        RespondType: "JSON",
-        Version: "1.5",
-        TimeStamp: timeStamp,
-        MerchantID: INVOICE_MERCHANT_ID,
-        MerchantOrderNo: result.MerchantOrderNo || "unknown",
-        Status: "1",
-        Category: "B2C",
-        BuyerName: buyerName,
-        BuyerEmail: buyerEmail,
-        PrintFlag: "Y",
-        CarrierType: "",
-        CarrierNum: "",
-        Donation: "0",
-        LoveCode: "",
-        TaxType: "1",
-        TaxRate: 5,
-        Amt: amt,
-        TaxAmt: 0,
-        TotalAmt: amt,
-        ItemName: itemNames,
-        ItemCount: itemCounts,
-        ItemUnit: itemUnits,
-        ItemPrice: itemPrices,
-        ItemAmt: itemAmts,
-        Comment: "感謝您的訂購",
-      };
+  RespondType: "JSON",
+  Version: "1.5",
+  TimeStamp: timeStamp,
+  MerchantID: INVOICE_MERCHANT_ID,
+  MerchantOrderNo: result.MerchantOrderNo || "unknown",
+  Status: "1",
+  Category: "B2C",
+  BuyerName: buyerName,
+  BuyerEmail: buyerEmail,
+  PrintFlag: "N",           // ✅ 改這裡：讓 ezPay 自動寄 email
+  CarrierType: "",          // ✅ 空白即可
+  CarrierNum: "",
+  Donation: "0",
+  LoveCode: "",
+  TaxType: "1",
+  TaxRate: 5,
+  Amt: amt,
+  TaxAmt: 0,
+  TotalAmt: amt,
+  ItemName: itemNames,
+  ItemCount: itemCounts,
+  ItemUnit: itemUnits,
+  ItemPrice: itemPrices,
+  ItemAmt: itemAmts,
+  Comment: "感謝您的訂購",
+  Notify: "E",              // ✅ 加這行：通知方式 email
+};
 
       invoiceData.CheckCode = genCheckCode({
         MerchantID: invoiceData.MerchantID,
@@ -181,6 +187,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         TimeStamp: invoiceData.TimeStamp,
       });
 
+      console.log("🧾 發票送出資料：", invoiceData);
+
       const encryptedPostData = encryptPostData(invoiceData);
       const invoiceRes = await axios.post(INVOICE_API_URL, qs.stringify({
         MerchantID_: INVOICE_MERCHANT_ID,
@@ -188,6 +196,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }), {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       });
+
+      console.log("📄 發票回傳原始資料：", invoiceRes.data);
+
+      if (invoiceRes.data.Status !== "SUCCESS") {
+        throw new Error(`發票開立失敗：${invoiceRes.data.Message || "未知錯誤"} (${invoiceRes.data.Status})`);
+      }
 
       const invoiceJson = JSON.parse(invoiceRes.data.Result);
 
@@ -204,19 +218,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
         ],
       }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
-
-      if (customerEmail) {
-        const invoiceHtml = `
-          <h3>📄 發票資訊</h3>
-          <p><strong>發票號碼：</strong>${invoiceJson.InvoiceNumber}</p>
-          <p><strong>隨機碼：</strong>${invoiceJson.RandomNum}</p>
-          <p><strong>開立時間：</strong>${invoiceJson.CreateTime}</p>
-          <p><strong>條碼：</strong>${invoiceJson.BarCode}</p>
-          <img src="https://inv.ezpay.com.tw/qrcode?code=${encodeURIComponent(invoiceJson.QRcodeL)}" alt="發票 QRCode" style="max-width: 300px;" />
-        `;
-
-        await sendEsimEmail(customerEmail, orderNumber, allImagesHtml.join("<br /><hr><br />") + "<br /><hr><br />" + invoiceHtml);
-      }
     } catch (invoiceErr: any) {
       console.error("❌ 發票開立失敗：", invoiceErr?.response?.data || invoiceErr.message);
       await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, {
