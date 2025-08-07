@@ -4,10 +4,11 @@ export default async function handler(req, res) {
   const channelId = "2007568484";
   const channelSecret = "cb183f20b331f6c246755708eef99437";
 
-  const { cartItems, totalPrice = 100 } = req.body;
+  const { cartItems, totalPrice = 0, discount = 0 } = req.body;
+  const finalAmount = Math.max(Math.round(totalPrice - discount), 1); // 避免負數或 0
+
   const orderId = "ORDER_" + Date.now();
 
-  // 建立商品清單
   const products = cartItems.map((item, index) => ({
     id: item.sku || `sku-${index}`,
     name: item.name || `商品 ${index + 1}`,
@@ -16,20 +17,19 @@ export default async function handler(req, res) {
   }));
 
   const body = {
-    amount: Math.round(totalPrice),
+    amount: finalAmount,
     currency: "TWD",
     orderId,
     packages: [
       {
         id: "pkg_" + Date.now(),
-        amount: Math.round(totalPrice),
+        amount: finalAmount,
         name: "汪喵通SIM",
         products,
       },
     ],
     redirectUrls: {
-      // ✅ 加上 amount 和 orderId 參數，供 linepay-confirm 頁面使用
-      confirmUrl: `https://www.wmesim.com/linepay-confirm?orderId=${orderId}&amount=${totalPrice}`,
+      confirmUrl: `https://www.wmesim.com/linepay-confirm?orderId=${orderId}&amount=${finalAmount}`,
       cancelUrl: "https://www.wmesim.com/linepay-cancel",
     },
   };
@@ -59,7 +59,6 @@ export default async function handler(req, res) {
     const result = await response.json();
     console.log("✅ LINE Pay 預約結果：", result);
 
-    // 可以把 orderId 傳給前端用於後續處理（如查詢訂單）
     res.status(response.status).json({ ...result, orderId });
   } catch (error) {
     console.error("❌ LINE Pay Request Error:", error);
