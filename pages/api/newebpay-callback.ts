@@ -174,8 +174,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   BuyerName: buyerName,
   BuyerEmail: buyerEmail,
   PrintFlag: "N",
-  CarrierType: "E",
-  CarrierNum: buyerEmail,
+
   Donation: "0",
   LoveCode: "",
   TaxType: "1",
