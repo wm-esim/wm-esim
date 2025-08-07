@@ -38,31 +38,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(404).json({ error: "找不到訂單" });
     }
 
-    const qrcodes: { name: string; src: string }[] = [];
+    const getMeta = (key: string) =>
+      order.meta_data?.find((meta: any) => meta.key === key)?.value;
 
-    for (const item of order.line_items) {
-      const productId = item.product_id;
-      const productRes = await axios.get(
-        `https://fegoesim.com/wp-json/wc/v3/products/${productId}`,
-        {
-          auth: {
-            username: CONSUMER_KEY,
-            password: CONSUMER_SECRET,
-          },
-        }
-      );
+    const qrcodeUrl = getMeta("esim_qrcode");
+    const quantity = parseInt(getMeta("esim_quantity") || "1", 10);
 
-      const product = productRes.data;
-      const name = product.name;
-
-      // 嘗試從訂單的 line_items.meta_data 內取得該商品對應 QRCode
-      const itemMeta = item.meta_data || [];
-      const qrcode = itemMeta.find((m: any) => m.key === "esim_qrcode")?.value;
-
-      if (qrcode) {
-        qrcodes.push({ name, src: qrcode });
-      }
-    }
+    const qrcodes = Array.from({ length: quantity }).map((_, idx) => ({
+      name: `eSIM #${idx + 1}`,
+      src: qrcodeUrl,
+    }));
 
     const orderInfo = {
       status: order.status,

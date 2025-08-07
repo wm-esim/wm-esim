@@ -1,7 +1,13 @@
+// ✅ ThankYouPage.tsx
 "use client";
 
 import { useEffect, useState } from "react";
 import axios from "axios";
+
+interface QrcodeInfo {
+  name: string;
+  src: string;
+}
 
 interface OrderInfo {
   status: string | null;
@@ -12,14 +18,9 @@ interface OrderInfo {
   TradeNo?: string;
 }
 
-interface QrcodeItem {
-  name: string;
-  src: string;
-}
-
 export default function ThankYouPage() {
   const [orderInfo, setOrderInfo] = useState<OrderInfo | null>(null);
-  const [qrcodes, setQrcodes] = useState<QrcodeItem[]>([]);
+  const [qrcodes, setQrcodes] = useState<QrcodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -37,7 +38,7 @@ export default function ThankYouPage() {
         const { qrcodes, orderInfo } = res.data;
 
         setOrderInfo(orderInfo || null);
-        setQrcodes(Array.isArray(qrcodes) ? qrcodes : []);
+        setQrcodes(qrcodes || []);
       } catch (err) {
         console.error("❌ 抓取訂單資料失敗", err);
       } finally {
@@ -49,11 +50,11 @@ export default function ThankYouPage() {
   }, []);
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-20">
-      <h1 className="text-3xl font-bold mb-6 text-center">感謝您的訂購</h1>
+    <div className="max-w-2xl mx-auto px-4 py-20">
+      <h1 className="text-2xl font-bold mb-4">感謝您的訂購</h1>
 
       {orderInfo ? (
-        <div className="bg-gray-100 p-6 rounded mb-10 shadow">
+        <div className="bg-gray-100 p-6 rounded space-y-2">
           <p>付款狀態：{orderInfo.status}</p>
           {orderInfo.MerchantOrderNo && (
             <>
@@ -68,23 +69,21 @@ export default function ThankYouPage() {
         <p>正在解析交易資訊...</p>
       )}
 
-      <div>
-        {loading && <p className="text-center">正在載入 QRCode...</p>}
+      <div className="mt-10">
+        {loading && <p>正在載入 QRCode...</p>}
 
         {!loading && qrcodes.length > 0 && (
-          <div className="space-y-8">
-            {qrcodes.map((item, idx) => (
-              <div
-                key={idx}
-                className="border p-6 rounded shadow flex flex-col items-center"
-              >
-                <h2 className="text-xl font-semibold mb-4 text-center">
-                  {item.name}
-                </h2>
+          <div className="space-y-6">
+            <h2 className="text-xl font-bold mb-2">
+              請掃描下方 QRCode 啟用 eSIM
+            </h2>
+            {qrcodes.map((qrcode, index) => (
+              <div key={index} className="text-center">
+                <p className="font-semibold mb-2">{qrcode.name}</p>
                 <img
-                  src={item.src}
-                  alt={`QRCode for ${item.name}`}
-                  className="w-64 h-64"
+                  src={qrcode.src}
+                  alt={`eSIM QRCode ${index + 1}`}
+                  className="w-64 h-64 mx-auto"
                 />
               </div>
             ))}
@@ -92,9 +91,7 @@ export default function ThankYouPage() {
         )}
 
         {!loading && qrcodes.length === 0 && (
-          <p className="text-red-500 text-center">
-            無法取得 QRCode，請聯繫客服協助。
-          </p>
+          <p className="text-red-500">無法取得 QRCode，請聯繫客服協助。</p>
         )}
       </div>
     </div>
