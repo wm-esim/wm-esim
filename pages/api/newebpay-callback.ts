@@ -148,9 +148,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       itemNames.push(item.name);
       itemCounts.push(String(item.quantity));
       itemUnits.push("項");
-      const price = Math.round(Number(item.total) / item.quantity);
-      itemPrices.push(String(price));
-      itemAmts.push(String(item.total));
+  const price = Math.round(Number(item.total) / item.quantity);
+itemPrices.push(String(price));
+itemAmts.push(String(price * item.quantity));
+
     }
 
     const discount = Number(order.discount_total || 0);
