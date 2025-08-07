@@ -14,11 +14,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: "缺少訂單編號（orderNo）" });
   }
 
-  // ✅ 將 &、/、\ 等特殊符號統一轉為 -
   orderNo = orderNo.replace(/[&\/\\]/g, "-");
 
   try {
-    // 🔍 拉最近 20 筆用 meta_data 找符合的訂單
     const { data: orders } = await axios.get(WC_API_URL, {
       auth: {
         username: CONSUMER_KEY,
@@ -40,12 +38,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(404).json({ error: "找不到訂單" });
     }
 
-    const meta = order.meta_data || [];
-    const getMeta = (key: string) => meta.find((m: any) => m.key === key)?.value;
+    const qrcodes: { name: string; src: string }[] = [];
 
-    const qrcode = getMeta("esim_qrcode");
-    const esim_plan_id = getMeta("esim_plan_id");
-    const esim_topup_id = getMeta("esim_topup_id");
+    for (const item of order.line_items) {
+      const productId = item.product_id;
+      const productRes = await axios.get(
+        `https://fegoesim.com/wp-json/wc/v3/products/${productId}`,
+        {
+          auth: {
+            username: CONSUMER_KEY,
+            password: CONSUMER_SECRET,
+          },
+        }
+      );
+
+      const product = productRes.data;
+      const name = product.name;
+
+      // 嘗試從訂單的 line_items.meta_data 內取得該商品對應 QRCode
+      const itemMeta = item.meta_data || [];
+      const qrcode = itemMeta.find((m: any) => m.key === "esim_qrcode")?.value;
+
+      if (qrcode) {
+        qrcodes.push({ name, src: qrcode });
+      }
+    }
 
     const orderInfo = {
       status: order.status,
@@ -55,7 +72,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       TradeNo: order.transaction_id || "",
     };
 
-    return res.status(200).json({ qrcode, esim_plan_id, esim_topup_id, orderInfo });
+    return res.status(200).json({ qrcodes, orderInfo });
   } catch (err: any) {
     console.error("❌ 查詢 WooCommerce 訂單失敗", err.message);
     return res.status(500).json({ error: "WooCommerce 查詢失敗", details: err.message });

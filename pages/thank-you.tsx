@@ -12,9 +12,14 @@ interface OrderInfo {
   TradeNo?: string;
 }
 
+interface QrcodeItem {
+  name: string;
+  src: string;
+}
+
 export default function ThankYouPage() {
   const [orderInfo, setOrderInfo] = useState<OrderInfo | null>(null);
-  const [qrcode, setQrcode] = useState<string | null>(null);
+  const [qrcodes, setQrcodes] = useState<QrcodeItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -29,10 +34,10 @@ export default function ThankYouPage() {
           params: { orderNo },
         });
 
-        const { qrcode, orderInfo } = res.data;
+        const { qrcodes, orderInfo } = res.data;
 
         setOrderInfo(orderInfo || null);
-        setQrcode(qrcode || null);
+        setQrcodes(Array.isArray(qrcodes) ? qrcodes : []);
       } catch (err) {
         console.error("❌ 抓取訂單資料失敗", err);
       } finally {
@@ -44,11 +49,11 @@ export default function ThankYouPage() {
   }, []);
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-20">
-      <h1 className="text-2xl font-bold mb-4">感謝您的訂購</h1>
+    <div className="max-w-3xl mx-auto px-4 py-20">
+      <h1 className="text-3xl font-bold mb-6 text-center">感謝您的訂購</h1>
 
       {orderInfo ? (
-        <div className="bg-gray-100 p-6 rounded">
+        <div className="bg-gray-100 p-6 rounded mb-10 shadow">
           <p>付款狀態：{orderInfo.status}</p>
           {orderInfo.MerchantOrderNo && (
             <>
@@ -63,20 +68,33 @@ export default function ThankYouPage() {
         <p>正在解析交易資訊...</p>
       )}
 
-      <div className="mt-10">
-        {loading && <p>正在載入 QRCode...</p>}
+      <div>
+        {loading && <p className="text-center">正在載入 QRCode...</p>}
 
-        {!loading && qrcode && (
-          <div>
-            <h2 className="text-xl font-bold mb-2">
-              請掃描下方 QRCode 啟用 eSIM
-            </h2>
-            <img src={qrcode} alt="eSIM QRCode" className="w-64 h-64 mx-auto" />
+        {!loading && qrcodes.length > 0 && (
+          <div className="space-y-8">
+            {qrcodes.map((item, idx) => (
+              <div
+                key={idx}
+                className="border p-6 rounded shadow flex flex-col items-center"
+              >
+                <h2 className="text-xl font-semibold mb-4 text-center">
+                  {item.name}
+                </h2>
+                <img
+                  src={item.src}
+                  alt={`QRCode for ${item.name}`}
+                  className="w-64 h-64"
+                />
+              </div>
+            ))}
           </div>
         )}
 
-        {!loading && !qrcode && (
-          <p className="text-red-500">無法取得 QRCode，請聯繫客服協助。</p>
+        {!loading && qrcodes.length === 0 && (
+          <p className="text-red-500 text-center">
+            無法取得 QRCode，請聯繫客服協助。
+          </p>
         )}
       </div>
     </div>
