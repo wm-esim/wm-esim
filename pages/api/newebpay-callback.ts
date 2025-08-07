@@ -164,33 +164,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     try {
       const invoiceData: Record<string, any> = {
-        RespondType: "JSON",
-        Version: "1.5",
-        TimeStamp: timeStamp,
-        MerchantID: INVOICE_MERCHANT_ID,
-        MerchantOrderNo: result.MerchantOrderNo || "unknown",
-        Status: "1",
-        Category: "B2C",
-        BuyerName: buyerName,
-        BuyerEmail: buyerEmail,
-        PrintFlag: "N",
-        CarrierType: "",
-        CarrierNum: "",
-        Donation: "0",
-        LoveCode: "",
-        TaxType: "1",
-        TaxRate: 5,
-        Amt: amt,
-        TaxAmt: 0,
-        TotalAmt: amt,
-        ItemName: itemNames.join("|"),
-        ItemCount: itemCounts.join("|"),
-        ItemUnit: itemUnits.join("|"),
-        ItemPrice: itemPrices.join("|"),
-        ItemAmt: itemAmts.join("|"),
-        Comment: "感謝您的訂購",
-        Notify: "E",
-      };
+  RespondType: "JSON",
+  Version: "1.5",
+  TimeStamp: timeStamp,
+  MerchantID: INVOICE_MERCHANT_ID,
+  MerchantOrderNo: result.MerchantOrderNo || "unknown",
+  Status: "1",
+  Category: "B2C",
+  BuyerName: buyerName,
+  BuyerEmail: buyerEmail,
+  PrintFlag: "N",           // ✅ 不列印，走電子發票
+  CarrierType: "",          // ✅ v
+  CarrierNum: "",
+  Notify: "E",              // ✅ 加這行，ezPay 自動寄 email
+  Donation: "0",
+  LoveCode: "",
+  TaxType: "1",
+  TaxRate: 5,
+  Amt: amt,
+  TaxAmt: 0,
+  TotalAmt: amt,
+  ItemName: itemNames.join("|"),
+  ItemCount: itemCounts.join("|"),
+  ItemUnit: itemUnits.join("|"),
+  ItemPrice: itemPrices.join("|"),
+  ItemAmt: itemAmts.join("|"),
+  Comment: "感謝您的訂購",
+};
+
 
       invoiceData.CheckCode = genCheckCode({
         MerchantID: invoiceData.MerchantID,
