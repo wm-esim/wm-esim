@@ -4,25 +4,20 @@ import axios from "axios";
 import nodemailer from "nodemailer";
 import qs from "qs";
 
-// 藍新金流金鑰
 const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
 const HASH_IV = "PKetlaZYZcZvlMmC";
 
-// WooCommerce API
 const WOOCOMMERCE_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
 const CONSUMER_KEY = "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04";
 const CONSUMER_SECRET = "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947";
 
-// eSIM Proxy API
 const ESIM_PROXY_URL = "https://www.wmesim.com/api/esim/qrcode";
 
-// ezPay 發票設定
 const INVOICE_API_URL = "https://inv.ezpay.com.tw/Api/invoice_issue";
 const INVOICE_MERCHANT_ID = "345049107";
 const INVOICE_HASH_KEY = "FnDByoo3m9U4nVi29UciIbAHVQRQogHG";
 const INVOICE_HASH_IV = "PtgsjF33nlm8q2kC";
 
-// SKU 對照表
 const PLAN_ID_MAP: Record<string, string> = {
   "Malaysia-Daily500MB-1-A0": "90ab730c-b369-4144-a6f5-be4376494791",
 };
@@ -52,7 +47,7 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-   user: "wandmesim@gmail.com",
+      user: "wandmesim@gmail.com",
       pass: "hwoywmluqvsuluss",
     },
   });
@@ -138,17 +133,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const customerEmail: string = order.billing?.email;
     if (customerEmail) await sendEsimEmail(customerEmail, orderNumber, allImagesHtml.join("<br /><hr><br />"));
 
-    // === 發票欄位準備 ===
     const buyerName = `${order.billing?.first_name || ""}${order.billing?.last_name || ""}` || "網路訂單";
     const buyerEmail = order.billing?.email || "test@example.com";
     const timeStamp = Math.floor(Date.now() / 1000).toString();
     const amt = Math.round(Number(result.Amt));
 
-    const itemNames = order.line_items.map((item: any) => item.name).join("|");
-    const itemCounts = order.line_items.map((item: any) => item.quantity).join("|");
-    const itemPrices = order.line_items.map((item: any) => String(Math.round(Number(item.total) / item.quantity))).join("|");
-    const itemAmts = order.line_items.map((item: any) => item.total).join("|");
-    const itemUnits = order.line_items.map(() => "項").join("|"); // ✅ 修正：每個商品對應一個單位
+    const itemNames = [];
+    const itemCounts = [];
+    const itemUnits = [];
+    const itemPrices = [];
+    const itemAmts = [];
+
+    for (const item of order.line_items) {
+      itemNames.push(item.name);
+      itemCounts.push(String(item.quantity));
+      itemUnits.push("項");
+      const price = Math.round(Number(item.total) / item.quantity);
+      itemPrices.push(String(price));
+      itemAmts.push(String(item.total));
+    }
+
+    const discount = Number(order.discount_total || 0);
+    if (discount > 0) {
+      itemNames.push("折價 SAVE");
+      itemCounts.push("1");
+      itemUnits.push("次");
+      itemPrices.push(`-${discount}`);
+      itemAmts.push(`-${discount}`);
+    }
 
     try {
       const invoiceData: Record<string, any> = {
@@ -161,7 +173,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         Category: "B2C",
         BuyerName: buyerName,
         BuyerEmail: buyerEmail,
-        PrintFlag: "Y",
+        PrintFlag: "N",
         CarrierType: "",
         CarrierNum: "",
         Donation: "0",
@@ -171,12 +183,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         Amt: amt,
         TaxAmt: 0,
         TotalAmt: amt,
-        ItemName: itemNames,
-        ItemCount: itemCounts,
-        ItemUnit: itemUnits,
-        ItemPrice: itemPrices,
-        ItemAmt: itemAmts,
+        ItemName: itemNames.join("|"),
+        ItemCount: itemCounts.join("|"),
+        ItemUnit: itemUnits.join("|"),
+        ItemPrice: itemPrices.join("|"),
+        ItemAmt: itemAmts.join("|"),
         Comment: "感謝您的訂購",
+        Notify: "E",
       };
 
       invoiceData.CheckCode = genCheckCode({
@@ -186,8 +199,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         TimeStamp: invoiceData.TimeStamp,
       });
 
-      console.log("🧾 發票送出資料：", invoiceData);
-
       const encryptedPostData = encryptPostData(invoiceData);
       const invoiceRes = await axios.post(INVOICE_API_URL, qs.stringify({
         MerchantID_: INVOICE_MERCHANT_ID,
@@ -195,8 +206,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }), {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       });
-
-      console.log("📄 發票回傳原始資料：", invoiceRes.data);
 
       if (invoiceRes.data.Status !== "SUCCESS") {
         throw new Error(`發票開立失敗：${invoiceRes.data.Message || "未知錯誤"} (${invoiceRes.data.Status})`);
