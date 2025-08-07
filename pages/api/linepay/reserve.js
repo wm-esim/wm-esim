@@ -1,11 +1,16 @@
 import crypto from "crypto";
 
-export default async function handler(req, res) {
-  const channelId = "2007568484";
-  const channelSecret = "cb183f20b331f6c246755708eef99437";
+const channelId = "2007568484";
+const channelSecret = "cb183f20b331f6c246755708eef99437";
 
-  const { cartItems, totalPrice = 0, discount = 0 } = req.body;
-  const finalAmount = Math.max(Math.round(totalPrice - discount), 1); // 避免負數或 0
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
+
+  const { cartItems, totalPrice = 100, discount = 0, email } = req.body;
+
+  if (!cartItems || !Array.isArray(cartItems)) {
+    return res.status(400).json({ error: "缺少 cartItems" });
+  }
 
   const orderId = "ORDER_" + Date.now();
 
@@ -15,6 +20,17 @@ export default async function handler(req, res) {
     quantity: item.quantity || 1,
     price: Math.round(item.price || 0),
   }));
+
+  if (discount > 0) {
+    products.push({
+      id: "discount",
+      name: "折扣優惠",
+      quantity: 1,
+      price: -Math.round(discount),
+    });
+  }
+
+  const finalAmount = products.reduce((sum, p) => sum + p.price * p.quantity, 0);
 
   const body = {
     amount: finalAmount,
@@ -38,11 +54,7 @@ export default async function handler(req, res) {
   const uri = "/v3/payments/request";
   const nonce = crypto.randomUUID();
   const stringToSign = channelSecret + uri + rawBody + nonce;
-
-  const signature = crypto
-    .createHmac("sha256", channelSecret)
-    .update(stringToSign)
-    .digest("base64");
+  const signature = crypto.createHmac("sha256", channelSecret).update(stringToSign).digest("base64");
 
   try {
     const response = await fetch(`https://api-pay.line.me${uri}`, {
@@ -59,9 +71,18 @@ export default async function handler(req, res) {
     const result = await response.json();
     console.log("✅ LINE Pay 預約結果：", result);
 
-    res.status(response.status).json({ ...result, orderId });
+    res.status(response.status).json({
+      ...result,
+      orderId,
+      amount: finalAmount,
+      cartItems,
+      email,
+    });
   } catch (error) {
     console.error("❌ LINE Pay Request Error:", error);
-    res.status(500).json({ error: "LINE Pay API 請求失敗", detail: error.message });
+    res.status(500).json({
+      error: "LINE Pay API 請求失敗",
+      detail: error.message,
+    });
   }
 }

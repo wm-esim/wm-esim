@@ -9,44 +9,56 @@ import nodemailer from "nodemailer";
 const channelId = "2007568484";
 const channelSecret = "cb183f20b331f6c246755708eef99437";
 
-// WooCommerce 設定
+// WooCommerce
 const WOOCOMMERCE_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
 const CONSUMER_KEY = "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04";
 const CONSUMER_SECRET = "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947";
 
-// eSIM QRCode API
+// eSIM QRCode Proxy
 const ESIM_PROXY_URL = "https://www.wmesim.com/api/esim/qrcode";
 
-// ezPay 設定
+// ezPay 發票
 const INVOICE_API_URL = "https://inv.ezpay.com.tw/Api/invoice_issue";
 const INVOICE_MERCHANT_ID = "345049107";
 const INVOICE_HASH_KEY = "FnDByoo3m9U4nVi29UciIbAHVQRQogHG";
 const INVOICE_HASH_IV = "PtgsjF33nlm8q2kC";
 
-// SMTP 寄信設定
+// 建立寄件者
 const transporter = nodemailer.createTransport({
-  service: "Gmail",
+  service: "gmail",
   auth: {
-    user: "your-email@gmail.com",        // TODO: 改為你自己的寄件人帳號
-    pass: "your-app-password",           // TODO: 改為 Gmail App Password
+    user: "wandmesim@gmail.com",
+    pass: "hwoywmluqvsuluss",
   },
 });
 
+function encryptAES(data: any, key: string, iv: string) {
+  const text = qs.stringify(data);
+  const cipher = crypto.createCipheriv("aes-256-cbc", key.padEnd(32, " "), iv);
+  let encrypted = cipher.update(text, "utf8", "hex");
+  encrypted += cipher.final("hex");
+  return encrypted;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const { transactionId, orderId } = req.query;
+  if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
-  if (!transactionId || typeof transactionId !== "string") {
-    return res.status(400).json({ error: "缺少 transactionId" });
+  const { transactionId, orderId, amount, email, cartItems } = req.body;
+  // ✅ Debug log
+  console.log("📦 Received callback payload:", {
+    transactionId,
+    orderId,
+    amount,
+    email,
+    cartItems,
+  });
+  if (!transactionId || !orderId || !amount || !email || !cartItems) {
+    return res.status(400).json({ error: "缺少必要欄位" });
   }
 
-  if (!orderId || typeof orderId !== "string") {
-    return res.status(400).json({ error: "缺少 orderId" });
-  }
-
-  // 🔐 建立 LINE Pay 簽章
+  // Confirm LINE Pay 付款
   const uri = `/v3/payments/${transactionId}/confirm`;
-  const body = { amount: 100, currency: "TWD" };
-  const rawBody = JSON.stringify(body);
+  const rawBody = JSON.stringify({ amount, currency: "TWD" });
   const nonce = crypto.randomUUID();
   const signature = crypto
     .createHmac("sha256", channelSecret)
@@ -54,7 +66,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     .digest("base64");
 
   try {
-    // ✅ 確認付款
     const confirmRes = await fetch(`https://api-pay.line.me${uri}`, {
       method: "POST",
       headers: {
@@ -65,14 +76,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       },
       body: rawBody,
     });
+
     const confirmData = await confirmRes.json();
+    console.log("✅ LINE Pay confirm 回傳結果: ", confirmData);
 
     if (confirmData.returnCode !== "0000") {
-      return res.status(400).json({ error: "付款確認失敗", detail: confirmData });
+      return res.status(400).json({ error: "付款失敗", detail: confirmData });
     }
 
-    // ✅ 建立 WooCommerce 訂單
-    const wcOrder = await axios.post(
+    // WooCommerce 建立訂單
+    const wcOrderRes = await axios.post(
       WOOCOMMERCE_API_URL,
       {
         payment_method: "linepay",
@@ -80,9 +93,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         set_paid: true,
         billing: {
           first_name: "LinePay",
-          email: "user@example.com", // TODO: 前端 checkout 時傳入客戶 email 並附在 ?orderId=...&transactionId=...&email=
+          email,
         },
-        line_items: [{ product_id: 123, quantity: 1 }], // TODO: 換成實際商品 ID 與數量
+        line_items: cartItems.map((item: any) => ({
+          product_id: item.id,
+          quantity: item.quantity,
+        })),
+        meta_data: [{ key: "linepay_transaction_id", value: transactionId }],
         customer_note: `LINE Pay 訂單 ${transactionId}`,
       },
       {
@@ -93,13 +110,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     );
 
-    const wcOrderId = wcOrder.data.id;
+    const wcOrder = wcOrderRes.data;
+    const wcOrderId = wcOrder.id;
+    const orderNumber = wcOrder.number;
 
-    // ✅ 取得 QRCode
+    // 取得 QRCode
     const qrRes = await axios.post(ESIM_PROXY_URL, { orderId: wcOrderId });
-    const qrUrl = qrRes.data?.qrCodeUrl || "未產生 QRCode";
+    const qrUrl = qrRes.data?.qrCodeUrl || "";
+    const imagesHtml = qrUrl ? `<img src="${qrUrl}" width="200" />` : "";
 
-    // ✅ 寫入訂單備註
+    // 寫入備註
     await axios.post(
       `${WOOCOMMERCE_API_URL}/${wcOrderId}/notes`,
       { note: `eSIM QRCode: ${qrUrl}` },
@@ -111,15 +131,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     );
 
-    // ✅ 發送 Email
+    // 寄出 email
     await transporter.sendMail({
-      from: "汪喵通 SIM <your-email@gmail.com>",
-      to: "user@example.com", // TODO: 改為實際 email
-      subject: "您的 eSIM QRCode",
-      html: `<p>感謝您的購買！以下是您的 QRCode：</p><img src="${qrUrl}" width="200" />`,
+      from: "汪喵通 SIM <wandmesim@gmail.com>",
+      to: email,
+      subject: `您的訂單 ${orderNumber} 的 eSIM QRCode`,
+      html: `<p>感謝您的購買，以下為 QRCode：</p>${imagesHtml}`,
     });
 
-    // ✅ 開立電子發票
+    // 開立發票
+    const amt = Math.round(amount / 1.05);
+    const taxAmt = amount - amt;
+
     const invoiceData = {
       RespondType: "JSON",
       Version: "1.4",
@@ -127,46 +150,32 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       MerchantOrderNo: `INV${Date.now()}`,
       Status: "1",
       Category: "B2C",
-      BuyerEmail: "user@example.com",
+      BuyerEmail: email,
       PrintFlag: "N",
       TaxType: "1",
       TaxRate: "5",
-      Amt: "100",
-      TaxAmt: "5",
-      TotalAmt: "105",
+      Amt: amt.toString(),
+      TaxAmt: taxAmt.toString(),
+      TotalAmt: amount.toString(),
       ItemName: "eSIM",
       ItemCount: "1",
       ItemUnit: "組",
-      ItemPrice: "100",
-      ItemAmt: "100",
+      ItemPrice: amt.toString(),
+      ItemAmt: amt.toString(),
     };
 
     const encrypted = encryptAES(invoiceData, INVOICE_HASH_KEY, INVOICE_HASH_IV);
     const invoiceRes = await axios.post(
       INVOICE_API_URL,
-      qs.stringify({
-        MerchantID_: INVOICE_MERCHANT_ID,
-        PostData_: encrypted,
-      })
+      qs.stringify({ MerchantID_: INVOICE_MERCHANT_ID, PostData_: encrypted })
     );
 
-    console.log("✅ 發票回傳結果：", invoiceRes.data);
+    console.log("✅ 發票開立成功：", invoiceRes.data);
 
-    // ✅ 完成導向 Thank You 頁面
+    // 完成
     return res.redirect(`/thank-you?order=${wcOrderId}`);
   } catch (err: any) {
     console.error("❌ LINE Pay Callback 錯誤", err);
-    return res
-      .status(500)
-      .json({ error: "LINE Pay Callback 發生錯誤", detail: err.message });
+    return res.status(500).json({ error: "LINE Pay Callback 發生錯誤", detail: err.message });
   }
-}
-
-// AES 加密
-function encryptAES(data: any, key: string, iv: string) {
-  const text = qs.stringify(data);
-  const cipher = crypto.createCipheriv("aes-256-cbc", key.padEnd(32, " "), iv);
-  let encrypted = cipher.update(text, "utf8", "hex");
-  encrypted += cipher.final("hex");
-  return encrypted;
 }
