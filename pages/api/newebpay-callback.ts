@@ -75,8 +75,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const resultStr = parsed.Result as string;
     const result = typeof resultStr === "string" ? qs.parse(resultStr) : resultStr;
 
- const orderNumber: string = String(result?.MerchantOrderNo || "");
-
+    const orderNumber = result?.MerchantOrderNo;
     if (!orderNumber) throw new Error("❌ 缺少 transactionId / MerchantOrderNo");
 
     if (!result || result.Status === "FAILED") {
@@ -137,13 +136,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
     }
 
-// 加在這裡
-const customerEmail = order.billing?.email;
-const emailContent = allImagesHtml.join("<br /><hr><br />");
-
-if (typeof customerEmail === "string" && customerEmail.includes("@")) {
-  await sendEsimEmail(customerEmail, orderNumber ?? "UNKNOWN", emailContent);
-}
 
 
 
@@ -177,34 +169,33 @@ if (typeof customerEmail === "string" && customerEmail.includes("@")) {
     }
 
     try {
-     const invoiceData: Record<string, any> = {
-  RespondType: "JSON",
-  Version: "1.5",
-  TimeStamp: timeStamp,
-  MerchantID: INVOICE_MERCHANT_ID,
-  MerchantOrderNo: result.MerchantOrderNo || "unknown",
-  Status: "1",
-  Category: "B2C",
-  BuyerName: buyerName,
-  BuyerEmail: buyerEmail,
-  PrintFlag: "Y",
-  CarrierType: "",
-  CarrierNum: "",
-  Donation: "0",
-  LoveCode: "",
-  TaxType: "1",
-  TaxRate: 5,
-  Amt: amt,
-  TaxAmt: 0,
-  TotalAmt: amt,
-  ItemName: itemNames.join("|"),
-  ItemCount: itemCounts.join("|"),
-  ItemUnit: itemUnits.join("|"),
-  ItemPrice: itemPrices.join("|"),
-  ItemAmt: itemAmts.join("|"),
-  Comment: "感謝您的訂購",
-};
-
+      const invoiceData: Record<string, any> = {
+        RespondType: "JSON",
+        Version: "1.5",
+        TimeStamp: timeStamp,
+        MerchantID: INVOICE_MERCHANT_ID,
+        MerchantOrderNo: result.MerchantOrderNo || "unknown",
+        Status: "1",
+        Category: "B2C",
+        BuyerName: buyerName,
+        BuyerEmail: buyerEmail,
+        PrintFlag: "Y",
+        CarrierType: "",
+        CarrierNum: "",
+        Donation: "0",
+        LoveCode: "",
+        TaxType: "1",
+        TaxRate: 5,
+        Amt: amt,
+        TaxAmt: 0,
+        TotalAmt: amt,
+        ItemName: itemNames,
+        ItemCount: itemCounts,
+        ItemUnit: itemUnits,
+        ItemPrice: itemPrices,
+        ItemAmt: itemAmts,
+        Comment: "感謝您的訂購",
+      };
 
       invoiceData.CheckCode = genCheckCode({
         MerchantID: invoiceData.MerchantID,
