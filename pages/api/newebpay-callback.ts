@@ -67,20 +67,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const { TradeInfo } = req.body;
+try {
+  const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
+
+  let parsed: any;
 
   try {
-    const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
-    const parsed = qs.parse(decrypted);
-    console.log("🔓 解密後 Parsed：", parsed);
+    parsed = JSON.parse(decrypted); // ✅ 嘗試 JSON 解析
+    console.log("🔓 解密後 Parsed (JSON)：", parsed);
+  } catch {
+    parsed = qs.parse(decrypted); // ✅ 若失敗則 fallback 為 querystring
+    console.log("🔓 解密後 Parsed (QueryString)：", parsed);
 
-    if (parsed.Status !== "SUCCESS") {
-      console.warn("⚠️ 非成功交易：", parsed);
-      res.redirect(302, `/thank-you?status=fail&orderNo=${parsed.MerchantOrderNo || ""}`);
-      return;
+    // ✅ 若 Result 是字串 JSON，再解一次
+    if (typeof parsed.Result === "string") {
+      parsed.Result = JSON.parse(parsed.Result);
     }
+  }
 
-    const result = JSON.parse(parsed.Result as string);
-    const orderNumber = result?.MerchantOrderNo;
+  if (parsed.Status !== "SUCCESS") {
+    console.warn("⚠️ 非成功交易：", parsed);
+    res.redirect(302, `/thank-you?status=fail&orderNo=${parsed?.Result?.MerchantOrderNo || ""}`);
+    return;
+  }
+
+  const result = parsed.Result;
+  const orderNumber = result.MerchantOrderNo;
+
+
 
     const { data: orders } = await axios.get(WOOCOMMERCE_API_URL, {
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
