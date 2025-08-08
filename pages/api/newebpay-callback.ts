@@ -70,13 +70,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
     console.log("🔓 解密後 TradeInfo：", decrypted);
-
-    const parsed = qs.parse(decrypted);
-    const resultStr = parsed.Result as string;
-    const result = typeof resultStr === "string" ? qs.parse(resultStr) : resultStr;
-
+    const result = JSON.parse(decrypted).Result;
     const orderNumber = result?.MerchantOrderNo;
-    if (!orderNumber) throw new Error("❌ 缺少 transactionId / MerchantOrderNo");
 
     if (!result || result.Status === "FAILED") {
       console.warn("⚠️ 非成功交易：", result);
@@ -95,7 +90,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.redirect(302, `/thank-you?status=notfound&orderNo=${orderNumber}`);
       return;
     }
-
     const orderId = order.id;
     const { data: fullOrder } = await axios.get(`${WOOCOMMERCE_API_URL}/${orderId}`, {
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
@@ -109,6 +103,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (planIdsWithQty.length === 0) throw new Error("❌ 無法從訂單抓取 esim_plan_id");
 
     const allImagesHtml: string[] = [];
+
     for (const { planId, quantity } of planIdsWithQty) {
       const resolvedPlanId = PLAN_ID_MAP[planId] || planId;
       const { data: esim } = await axios.post(ESIM_PROXY_URL, { channel_dataplan_id: resolvedPlanId, number: quantity });
@@ -117,7 +112,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const src = item.startsWith("http") ? item : `data:image/png;base64,${item}`;
         return `<img src="${src}" style="max-width:300px;margin-bottom:10px;" />`;
       }).join("<br />");
-
       allImagesHtml.push(imagesHtml);
 
       await axios.put(`${WOOCOMMERCE_API_URL}/${orderId}`, {
@@ -136,8 +130,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
     }
 
-
-
+    const customerEmail: string = order.billing?.email;
+    if (customerEmail) await sendEsimEmail(customerEmail, orderNumber, allImagesHtml.join("<br /><hr><br />"));
 
     const buyerName = `${order.billing?.first_name || ""}${order.billing?.last_name || ""}` || "網路訂單";
     const buyerEmail = order.billing?.email || "test@example.com";
@@ -169,7 +163,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     try {
-      const invoiceData: Record<string, any> = {
+    const invoiceData: Record<string, any> = {
         RespondType: "JSON",
         Version: "1.5",
         TimeStamp: timeStamp,
@@ -197,12 +191,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         Comment: "感謝您的訂購",
       };
 
-      invoiceData.CheckCode = genCheckCode({
-        MerchantID: invoiceData.MerchantID,
-        MerchantOrderNo: invoiceData.MerchantOrderNo,
-        Amt: String(invoiceData.Amt),
-        TimeStamp: invoiceData.TimeStamp,
-      });
+invoiceData.CheckCode = genCheckCode({
+  MerchantID: invoiceData.MerchantID,
+  MerchantOrderNo: invoiceData.MerchantOrderNo,
+  Amt: String(invoiceData.Amt),
+  TimeStamp: invoiceData.TimeStamp,
+});
+
 
       const encryptedPostData = encryptPostData(invoiceData);
       const invoiceRes = await axios.post(INVOICE_API_URL, qs.stringify({
@@ -211,9 +206,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }), {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       });
-
-      console.log("📨 發票回應原始內容：", invoiceRes.data);
-
+console.log("📨 發票回應原始內容：", invoiceRes.data); 
       if (invoiceRes.data.Status !== "SUCCESS") {
         throw new Error(`發票開立失敗：${invoiceRes.data.Message || "未知錯誤"} (${invoiceRes.data.Status})`);
       }
@@ -233,7 +226,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
         ],
       }, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
-
     } catch (invoiceErr: any) {
       console.error("❌ 發票開立失敗：", invoiceErr?.response?.data || invoiceErr.message);
       await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, {
@@ -243,7 +235,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     res.redirect(302, `/thank-you?status=success&orderNo=${orderNumber}`);
-
   } catch (error: any) {
     console.error("❌ Callback 錯誤：", error?.response?.data || error.message);
     res.redirect(302, `/thank-you?status=error`);
