@@ -3,73 +3,98 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 
-export default function LinePayConfirm() {
+export default function LinePayConfirmPage() {
   const router = useRouter();
-  const { orderId, amount } = router.query;
+  const [status, setStatus] = useState("確認付款中...");
+  const [processing, setProcessing] = useState(false);
 
-  const [status, setStatus] = useState("processing");
+  const confirmAndCallback = async (transactionId, amount, orderId) => {
+    setProcessing(true);
+    setStatus("✅ 已發送付款確認請求...");
 
-  useEffect(() => {
-    if (!orderId || !amount) return;
+    try {
+      // 1. 確認付款
+      const res = await fetch("/api/linepay/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transactionId, amount }),
+      });
 
-    const email = localStorage.getItem("checkoutEmail") || "user@example.com";
-    const cartItems = JSON.parse(localStorage.getItem("cartItems") || "[]");
+      const result = await res.json();
+      console.log("✅ LINE Pay confirm 回傳結果:", result);
 
-    // ✅ 向後端確認 LINE Pay 交易資訊（包含 transactionId）
-    fetch(`/api/linepay/confirm-transaction?orderId=${orderId}`)
-      .then((res) => res.json())
-      .then((confirmData) => {
-        const transactionId = String(confirmData?.info?.transactionId || "");
+      if (result.returnCode === "0000") {
+        setStatus("✅ 付款成功，處理訂單中...");
 
-        if (!transactionId) {
-          console.error("❌ 無法取得 transactionId", confirmData);
-          setStatus("fail");
+        // 2. 從 localStorage 取得資料
+        const cartItems = JSON.parse(localStorage.getItem("cartItems") || "[]");
+        const customerEmail = localStorage.getItem("customerEmail") || "";
+        const customerName = localStorage.getItem("customerName") || "";
+        const discount = parseInt(
+          localStorage.getItem("couponDiscount") || "0"
+        );
+
+        if (!cartItems.length || !customerEmail) {
+          setStatus("⚠️ 找不到訂單資料，請聯絡客服");
           return;
         }
 
-        // ✅ 發送 callback 請求，建立訂單 / 寄信 / 發票等
-        return fetch("/api/linepay/linepay-callback", {
+        // 3. 呼叫 callback 建立 Woo 訂單、QRCode、發票
+        const callbackRes = await fetch("/api/linepay/linepay-callback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             transactionId,
-            orderId: String(orderId),
-            amount: Number(amount),
-            email,
+            amount,
+            orderId,
             cartItems,
+            customerEmail,
+            customerName,
+            discount,
           }),
         });
-      })
-      .then(async (res) => {
-        if (!res || !res.ok) {
-          const err = res ? await res.json() : { error: "callback 無回應" };
-          console.error("❌ callback error:", err);
-          setStatus("fail");
+
+        const callbackResult = await callbackRes.json();
+        console.log("📦 callback 結果:", callbackResult);
+
+        if (callbackRes.ok) {
+          setStatus("🎉 訂單完成，eSIM 與發票已寄出！");
+          // router.push("/thank-you");
         } else {
-          const data = await res.json();
-          console.log("✅ callback success:", data);
-          setStatus("success");
+          console.error("❗ callback error:", callbackResult);
+          setStatus(
+            "⚠️ 訂單已付款，但處理失敗：" +
+              (callbackResult.message || "未知錯誤")
+          );
         }
-      })
-      .catch((err) => {
-        console.error("❌ 發送 callback 錯誤:", err);
-        setStatus("fail");
-      });
-  }, [orderId, amount]);
+      } else {
+        setStatus(`❌ 付款失敗：${result.returnMessage || "未知錯誤"}`);
+      }
+    } catch (error) {
+      console.error("❌ 發生錯誤:", error);
+      setStatus("❌ 付款確認失敗：" + error.message);
+    }
+  };
+
+  useEffect(() => {
+    if (!router.isReady || processing) return;
+
+    const { transactionId, amount, orderId } = router.query;
+    console.log("🔍 URL 參數：", router.query);
+
+    const tid = Array.isArray(transactionId) ? transactionId[0] : transactionId;
+    const amt = Array.isArray(amount) ? parseInt(amount[0]) : parseInt(amount);
+    const oid = Array.isArray(orderId) ? orderId[0] : orderId;
+
+    if (!tid || isNaN(amt)) {
+      setStatus("❌ 缺少付款資訊（可能是 LINE Pay redirect URL 錯誤）");
+      return;
+    }
+
+    confirmAndCallback(tid, amt, oid || "");
+  }, [router.isReady, processing]);
 
   return (
-    <div className="p-10 text-center">
-      {status === "processing" && <p>正在確認付款中，請稍候...</p>}
-      {status === "success" && (
-        <p className="text-green-600 text-xl">
-          ✅ 付款成功！我們已收到您的付款。
-        </p>
-      )}
-      {status === "fail" && (
-        <p className="text-red-600 text-xl">
-          ❌ 付款失敗，請聯繫客服或重新操作。
-        </p>
-      )}
-    </div>
+    <div className="p-10 text-center text-xl whitespace-pre-line">{status}</div>
   );
 }
