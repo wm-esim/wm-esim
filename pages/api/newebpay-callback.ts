@@ -57,13 +57,44 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
     },
   });
   await transporter.sendMail({
-    from: `eSIM 團隊 <bob112722761236tom@gmail.com>`,
+    from: `eSIM 團隊 <wandmesim@gmail.com>`,
     to,
     subject: `訂單 ${orderNumber} 的 eSIM QRCode`,
     html: `<p>您好，感謝您的購買！以下是您的 eSIM QRCode：</p><p>${imagesHtml}</p>`,
   });
 }
+/** ===== 發送發票 Email ===== */
+async function sendInvoiceEmail(to: string, orderNumber: string, inv: any): Promise<void> {
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: { user: "wandmesim@gmail.com", pass: "hwoywmluqvsuluss" },
+  });
 
+  const qrL = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(inv.QRcodeL)}`;
+  const qrR = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(inv.QRcodeR)}`;
+
+  await transporter.sendMail({
+    from: `eSIM 團隊 <wandmesim@gmail.com>`,
+    to,
+    subject: `訂單 ${orderNumber} 發票通知（${inv.InvoiceNumber}）`,
+    html: `
+      <div style="font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.6">
+        <p>您好，您本次訂單（${orderNumber}）的電子發票已開立：</p>
+        <ul>
+          <li><b>發票號碼：</b>${inv.InvoiceNumber}</li>
+          <li><b>隨機碼：</b>${inv.RandomNum}</li>
+          <li><b>開立時間：</b>${inv.CreateTime}</li>
+        </ul>
+        <p>手機條碼掃描用 QR Code：</p>
+        <div style="display:flex;gap:16px;align-items:center">
+          <div><img src="${qrL}" alt="QR L"></div>
+          <div><img src="${qrR}" alt="QR R"></div>
+        </div>
+        <p style="margin-top:12px">若需紙本或異動，請回覆本信與我們聯繫，謝謝！</p>
+      </div>
+    `,
+  });
+}
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
   if (req.method !== "POST") {
     res.status(405).end("Method Not Allowed");
@@ -298,27 +329,31 @@ paidRows.forEach((r, idx) => {
 
     const invoiceJson = JSON.parse(invoiceRes.data.Result);
 
-    await axios.post(
-      `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
-      {
-        note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
-        customer_note: false,
-      },
-      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-    );
+    await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, {
+  note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
+  customer_note: false,
+}, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
 
-    await axios.put(
-      `${WOOCOMMERCE_API_URL}/${orderId}`,
-      {
-        meta_data: [
-          { key: "invoice_number", value: invoiceJson.InvoiceNumber },
-          { key: "invoice_random", value: invoiceJson.RandomNum },
-          { key: "invoice_qrcode_l", value: invoiceJson.QRcodeL },
-          { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
-        ],
-      },
-      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-    );
+// (2) Woo meta 更新
+await axios.put(`${WOOCOMMERCE_API_URL}/${orderId}`, {
+  meta_data: [
+    { key: "invoice_number", value: invoiceJson.InvoiceNumber },
+    { key: "invoice_random", value: invoiceJson.RandomNum },
+    { key: "invoice_qrcode_l", value: invoiceJson.QRcodeL },
+    { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
+  ],
+}, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
+
+// (3) ✅ 寄發票信（新增這段）
+if (customerEmail) {
+  try {
+    await sendInvoiceEmail(customerEmail, orderNumber, invoiceJson);
+    console.log(`📧 Invoice email sent to ${customerEmail} (${invoiceJson.InvoiceNumber})`);
+  } catch (mailErr: any) {
+    console.error("❌ 發票信寄送失敗：", mailErr?.response || mailErr?.message || mailErr);
+  }
+}
+
 
     res.redirect(302, `/thank-you?status=success&orderNo=${orderNumber}`);
   } catch (error: any) {
