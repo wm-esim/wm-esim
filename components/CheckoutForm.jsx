@@ -1,13 +1,19 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useCart } from "../components/context/CartContext";
 import Image from "next/image";
 import { motion } from "framer-motion";
 import PLAN_ID_MAP from "../lib/esim/planMap";
 
 const CheckoutPage = ({ onBack, onNext }) => {
-  const { cartItems, totalPrice, removeFromCart, updateQuantity } = useCart();
+  const { cartItems, removeFromCart, updateQuantity } = useCart();
+
+  // 未折扣小計（給後端算百分比）
+  const subtotal = useMemo(
+    () => cartItems.reduce((s, it) => s + it.price * it.quantity, 0),
+    [cartItems]
+  );
 
   const [formData, setFormData] = useState({
     name: "",
@@ -19,12 +25,13 @@ const CheckoutPage = ({ onBack, onNext }) => {
   });
 
   const [couponCode, setCouponCode] = useState("");
-  const [discount, setDiscount] = useState(0);
+  const [discount, setDiscount] = useState(0); // 實際折抵金額（元，整數）
   const [couponApplied, setCouponApplied] = useState(false);
+  const [couponInfo, setCouponInfo] = useState(null); // { code, type: "percent"|"fixed", amount }
   const [memberInfo, setMemberInfo] = useState(null);
   const [useMemberInfo, setUseMemberInfo] = useState(false);
 
-  const finalTotal = Math.max(totalPrice - discount, 0);
+  const finalTotal = Math.max(subtotal - discount, 0);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -39,33 +46,79 @@ const CheckoutPage = ({ onBack, onNext }) => {
     }
   }, []);
 
+  // 購物車金額變動時，若已套用優惠碼則自動重算
+  useEffect(() => {
+    if (couponApplied && couponInfo?.code) {
+      void reapplyCoupon();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subtotal]);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
+  // 重新計算目前已套用的券（購物車變更時）
+  const reapplyCoupon = async () => {
+    if (!couponInfo?.code) return;
+    try {
+      const code = couponInfo.code.toLowerCase(); // ✅ 用已套用的券碼
+      const res = await fetch(
+        `/api/validate-coupon?code=${encodeURIComponent(
+          code
+        )}&subtotal=${subtotal}`
+      );
+      const data = await res.json();
+      if (data.valid) {
+        setDiscount(Number(data.discount ?? 0));
+        setCouponInfo({
+          code: data.code,
+          type: data.type,
+          amount: Number(data.amount),
+        });
+      } else {
+        setDiscount(0);
+        setCouponApplied(false);
+        setCouponInfo(null);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // 第一次套用（按下「套用」）
   const handleApplyCoupon = async () => {
     if (!couponCode) return;
-
     try {
+      const code = couponCode.trim().toLowerCase(); // ✅ 用輸入框的券碼
       const res = await fetch(
-        `/api/validate-coupon?code=${couponCode.toLowerCase()}`
+        `/api/validate-coupon?code=${encodeURIComponent(
+          code
+        )}&subtotal=${subtotal}`
       );
       const data = await res.json();
 
       if (data.valid) {
-        setDiscount(data.amount);
+        setDiscount(Number(data.discount ?? 0)); // 實際折抵金額（元）
         setCouponApplied(true);
+        setCouponInfo({
+          code: data.code,
+          type: data.type,
+          amount: Number(data.amount),
+        });
       } else {
         alert(data.message || "優惠碼無效");
         setDiscount(0);
         setCouponApplied(false);
+        setCouponInfo(null);
       }
     } catch (err) {
       console.error("❌ 驗證失敗", err);
       alert("套用優惠碼時發生錯誤");
       setDiscount(0);
       setCouponApplied(false);
+      setCouponInfo(null);
     }
   };
 
@@ -79,6 +132,7 @@ const CheckoutPage = ({ onBack, onNext }) => {
       alert("購物車為空，無法結帳");
       return;
     }
+
     const newWindow = window.open("about:blank");
     try {
       const enrichedItems = cartItems.map((item) => {
@@ -101,19 +155,21 @@ const CheckoutPage = ({ onBack, onNext }) => {
           orderInfo: {
             ...formData,
             customerId: memberInfo?.id || 0,
-            couponCode,
-            discount,
+            couponCode: couponInfo?.code || couponCode,
+            discount, // 實際折抵金額（元）
           },
         }),
       });
 
       const html = await res.text();
-      newWindow.document.write(html);
-      newWindow.document.close();
+      if (newWindow) {
+        newWindow.document.write(html);
+        newWindow.document.close();
+      }
       if (onNext) onNext();
     } catch (err) {
       console.error("❌ 建立訂單失敗", err);
-      newWindow.close();
+      if (newWindow) newWindow.close();
       alert("送出失敗，請稍後再試");
     }
   };
@@ -146,8 +202,8 @@ const CheckoutPage = ({ onBack, onNext }) => {
           orderInfo: formData,
           cartItems: enrichedItems,
           totalPrice: finalTotal,
-          couponCode,
-          discount,
+          couponCode: couponInfo?.code || couponCode,
+          discount, // 實際折抵金額（元）
         }),
       });
 
@@ -180,6 +236,7 @@ const CheckoutPage = ({ onBack, onNext }) => {
           <div className="w-full lg:w-1/2 flex justify-center bg-white p-5 sm:p-10 m-2 flex-col">
             <div className="max-w-[500px] flex flex-col mx-auto items-center">
               <h2 className="text-xl font-bold mb-4">結帳資訊</h2>
+
               <div className="flex items-center w-full mb-4">
                 <input
                   type="checkbox"
@@ -203,6 +260,7 @@ const CheckoutPage = ({ onBack, onNext }) => {
                   同會員資料自動填入
                 </label>
               </div>
+
               <input
                 name="name"
                 value={formData.name}
@@ -227,6 +285,7 @@ const CheckoutPage = ({ onBack, onNext }) => {
                 className="border p-2 w-full border-gray-300 rounded-[13px] mb-2"
                 required
               />
+
               <div className="flex w-full mb-2">
                 <input
                   value={couponCode}
@@ -242,11 +301,15 @@ const CheckoutPage = ({ onBack, onNext }) => {
                   套用
                 </button>
               </div>
-              {couponApplied && (
+
+              {couponApplied && couponInfo && (
                 <p className="text-green-600 mb-2">
-                  已套用優惠碼，折扣 ${discount}
+                  {couponInfo.type === "percent"
+                    ? `已套用優惠碼，折扣 ${couponInfo.amount}%`
+                    : `已套用優惠碼，折扣 $${couponInfo.amount}`}
                 </p>
               )}
+
               <div className="mt-2 text-[14px] text-gray-600">
                 備註：請填入正確的 Email，此 Email 會拿來當作發送 QR CODE
                 兌換的依據
@@ -259,6 +322,7 @@ const CheckoutPage = ({ onBack, onNext }) => {
               <h3 className="text-lg font-semibold text-gray-900 mb-4">
                 購物車內容
               </h3>
+
               {cartItems.length === 0 ? (
                 <p className="text-gray-500">購物車是空的</p>
               ) : (
@@ -291,7 +355,7 @@ const CheckoutPage = ({ onBack, onNext }) => {
                                 item.id,
                                 item.color,
                                 item.size,
-                                parseInt(e.target.value)
+                                parseInt(e.target.value, 10)
                               )
                             }
                             className="w-16 rounded-[10px] px-2 py-1 text-sm border"
@@ -314,7 +378,8 @@ const CheckoutPage = ({ onBack, onNext }) => {
                   ))}
                 </ul>
               )}
-              <p className="text-right font-bold mt-4">總金額：${totalPrice}</p>
+
+              <p className="text-right font-bold mt-4">總金額：${subtotal}</p>
               {discount > 0 && (
                 <p className="text-right text-green-600">折扣：-${discount}</p>
               )}
