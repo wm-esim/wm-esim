@@ -215,36 +215,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       paidRows[paidRows.length - 1].paidCents = Math.max(0, paidRows[paidRows.length - 1].paidCents + diff);
       sumPaid = paidRows.reduce((s, r) => s + r.paidCents, 0);
     }
+// (F) 換算「每個 line item 的整體金額」為整數元，不再按單件拆分
+const itemNames: string[] = [];
+const itemCounts: string[] = [];
+const itemUnits: string[] = [];
+const itemPrices: string[] = [];
+const itemAmts: string[] = [];
 
-    // (F) 換算單價與品項小計（整數分），確保 sum(item) == totalPaidCents
-    const itemNames: string[] = [];
-    const itemCounts: string[] = [];
-    const itemUnits: string[] = [];
-    const itemPrices: string[] = [];
-    const itemAmts: string[] = [];
+let acc = 0;
+paidRows.forEach((r, idx) => {
+  // lineCents = 該品項分配後的「整體」實付金額（分）
+  let lineCents = r.paidCents;
 
-    let acc = 0;
-    paidRows.forEach((r, idx) => {
-      const qty = Math.max(1, r.qty);
-      // 單價分 = paidCents / qty（四捨五入）
-      let unitCents = roundHalfUp(r.paidCents / qty);
-      let lineCents = unitCents * qty;
+  // 最後一項補差，確保 sum(item) == totalPaidCents
+  if (idx === paidRows.length - 1) {
+    const remain = totalPaidCents - (acc + lineCents);
+    lineCents += remain;
+  }
+  acc += lineCents;
 
-      // 若因四捨五入導致累積誤差，最後一品補差
-      if (idx === paidRows.length - 1) {
-        const remain = totalPaidCents - (acc + lineCents);
-        lineCents += remain;
-        unitCents = roundHalfUp(lineCents / qty); // 最後一項重新對齊單價
-      }
+  const lineDollars = fromCents(lineCents); // 轉整數元
 
-      acc += lineCents;
-
-      itemNames.push(r.name);
-      itemCounts.push(String(qty));
-      itemUnits.push("項");
-      itemPrices.push(String(fromCents(unitCents))); // 整數元
-      itemAmts.push(String(fromCents(lineCents)));   // 整數元
-    });
+  // ✅ 發票上用「1」個單位開立，單價 = 小計 = 該品項整體金額
+  itemNames.push(`${r.name} x${r.qty}`); // 例如「馬來西亞 eSIM - 1天 500MB/日 x2」
+  itemCounts.push("1");
+  itemUnits.push("項");
+  itemPrices.push(String(lineDollars));
+  itemAmts.push(String(lineDollars));
+});
 
     // (G) 稅額（以分計算，再轉元整數）
     const taxRate = 5; // 應稅
