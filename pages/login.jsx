@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import Layout from "./Layout";
 import RegisterForm from "../components/RegisterForm";
+import ForgotPasswordForm from "../components/ForgotPasswordForm";
 
 const LoginRegisterPage = () => {
   const router = useRouter();
@@ -13,9 +14,12 @@ const LoginRegisterPage = () => {
   const [successMessage, setSuccessMessage] = useState("");
   const [editingEmail, setEditingEmail] = useState("");
   const [editMode, setEditMode] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
 
   useEffect(() => {
-    const savedToken = localStorage.getItem("token");
+    const savedToken =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (savedToken) {
       setToken(savedToken);
       fetchUser(savedToken);
@@ -29,7 +33,7 @@ const LoginRegisterPage = () => {
       }, 3000);
       return () => clearTimeout(timer);
     }
-  }, [token, userInfo]);
+  }, [token, userInfo, router]);
 
   useEffect(() => {
     if (successMessage) {
@@ -74,6 +78,8 @@ const LoginRegisterPage = () => {
         setUserInfo(data);
         localStorage.setItem("user", JSON.stringify(data));
         setEditingEmail(data.email || "");
+      } else {
+        console.error("取使用者失敗：", data);
       }
     } catch (err) {
       console.error("無法取得使用者資訊", err);
@@ -119,7 +125,10 @@ const LoginRegisterPage = () => {
             <div>
               <div className="flex justify-around mb-6">
                 <button
-                  onClick={() => setSelected("login")}
+                  onClick={() => {
+                    setSelected("login");
+                    setShowForgot(false);
+                  }}
                   className={`px-4 py-2 rounded-full font-bold transition-all duration-200 ${
                     selected === "login"
                       ? "bg-[#1757FF] text-white"
@@ -129,7 +138,10 @@ const LoginRegisterPage = () => {
                   登入
                 </button>
                 <button
-                  onClick={() => setSelected("sign-up")}
+                  onClick={() => {
+                    setSelected("sign-up");
+                    setShowForgot(false);
+                  }}
                   className={`px-4 py-2 rounded-full font-bold transition-all duration-200 ${
                     selected === "sign-up"
                       ? "bg-[#1757FF] text-white"
@@ -148,52 +160,85 @@ const LoginRegisterPage = () => {
               )}
 
               {selected === "login" ? (
-                <form onSubmit={handleLogin} className="flex flex-col gap-4">
-                  <input
-                    type="text"
-                    name="username"
-                    value={form.username}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        username: e.target.value,
-                      }))
-                    }
-                    className="mt-1 block rounded-[13px] w-full border border-gray-300 p-2 focus:ring-2 focus:ring-gray-600 focus:outline-none"
-                    required
-                    placeholder="請輸入帳號"
-                  />
-                  <input
-                    type="password"
-                    name="password"
-                    placeholder="請輸入密碼"
-                    value={form.password}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        password: e.target.value,
-                      }))
-                    }
-                    className="mt-1 block w-full border border-gray-300 rounded-[13px] p-2 focus:ring-2 focus:ring-gray-600 focus:outline-none"
-                    required
-                  />
-                  <button
-                    type="submit"
-                    className="bg-[#1757FF] text-white py-2 rounded-[10px] hover:bg-[#2a3ebb] transition"
-                  >
-                    登入
-                  </button>
-                  {message && (
-                    <p className="text-sm text-center text-red-500">
-                      {message}
-                    </p>
-                  )}
-                </form>
+                !showForgot ? (
+                  <>
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        if (loggingIn) return;
+                        setLoggingIn(true);
+                        await handleLogin(e);
+                        setLoggingIn(false);
+                      }}
+                      className="flex flex-col gap-4"
+                    >
+                      <input
+                        type="text"
+                        name="username"
+                        value={form.username}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            username: e.target.value,
+                          }))
+                        }
+                        className="mt-1 block rounded-[13px] w-full border border-gray-300 p-2 focus:ring-2 focus:ring-gray-600 focus:outline-none"
+                        required
+                        placeholder="請輸入帳號或 Email"
+                        autoComplete="username"
+                      />
+                      <input
+                        type="password"
+                        name="password"
+                        placeholder="請輸入密碼"
+                        value={form.password}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            password: e.target.value,
+                          }))
+                        }
+                        className="mt-1 block w-full border border-gray-300 rounded-[13px] p-2 focus:ring-2 focus:ring-gray-600 focus:outline-none"
+                        required
+                        autoComplete="current-password"
+                      />
+                      <button
+                        type="submit"
+                        disabled={loggingIn}
+                        className={`bg-[#1757FF] text-white py-2 rounded-[10px] hover:bg-[#2a3ebb] transition ${
+                          loggingIn ? "opacity-60 cursor-not-allowed" : ""
+                        }`}
+                      >
+                        {loggingIn ? "登入中…" : "登入"}
+                      </button>
+                    </form>
+
+                    {/* 忘記密碼入口 */}
+                    <div className="mt-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowForgot(true)}
+                        className="text-sm text-blue-600 underline"
+                      >
+                        忘記密碼？
+                      </button>
+                    </div>
+
+                    {message && (
+                      <p className="text-sm text-center text-red-500 mt-2">
+                        {message}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <ForgotPasswordForm onClose={() => setShowForgot(false)} />
+                )
               ) : (
                 <RegisterForm
                   onSuccess={(msg) => {
                     setSelected("login");
                     setSuccessMessage(msg);
+                    setShowForgot(false);
                   }}
                 />
               )}
