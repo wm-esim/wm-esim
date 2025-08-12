@@ -6,8 +6,8 @@ import { ChevronDownIcon, ChevronUpIcon } from "@heroicons/react/24/solid";
 
 const TAG_API_URL = `https://fegoesim.com/wp-json/wc/v3/products/tags`;
 const TAG_API_PARAMS = {
-  consumer_key: "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04",
-  consumer_secret: "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947",
+  consumer_key: "ck_ef9f4379124655ad946616864633bd37e3174bc2",
+  consumer_secret: "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4",
   per_page: 100,
 };
 

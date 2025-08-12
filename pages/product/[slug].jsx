@@ -20,7 +20,7 @@ const extractImageFromDescription = (html) => {
 export async function getStaticPaths() {
   try {
     const res = await fetch(
-      `https://fegoesim.com/wp-json/wc/v3/products?consumer_key=ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04&consumer_secret=cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947&per_page=100`
+      `https://fegoesim.com/wp-json/wc/v3/products?consumer_key=ck_ef9f4379124655ad946616864633bd37e3174bc2&consumer_secret=cs_3da596e08887d9c7ccbf8ee15213f83866c160d4&per_page=100`
     );
     const products = await res.json();
     const paths = products.map((product) => ({
@@ -37,7 +37,7 @@ export async function getStaticProps({ params }) {
   const { slug } = params;
   try {
     const res = await fetch(
-      `https://fegoesim.com/wp-json/wc/v3/products?slug=${slug}&consumer_key=ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04&consumer_secret=cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947`
+      `https://fegoesim.com/wp-json/wc/v3/products?slug=${slug}&consumer_key=ck_ef9f4379124655ad946616864633bd37e3174bc2&consumer_secret=cs_3da596e08887d9c7ccbf8ee15213f83866c160d4`
     );
     if (!res.ok) return { notFound: true };
     const data = await res.json();

@@ -4,8 +4,8 @@ import axios, { AxiosError } from "axios";
 // WooCommerce 設定
 const WOOCOMMERCE_API_BASE =
   "https://fegoesim.com/wp-json/wc/v3";
-const CONSUMER_KEY = "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04";
-const CONSUMER_SECRET = "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947";
+const CONSUMER_KEY = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
+const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");

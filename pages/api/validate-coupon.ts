@@ -3,8 +3,8 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import axios from "axios";
 
 const WC_API = "https://fegoesim.com/wp-json/wc/v3/coupons";
-const CONSUMER_KEY = "ck_0ed8acaab9f0bc4cd27c71c2e7ae9ccc3ca45b04";
-const CONSUMER_SECRET = "cs_50ad8ba137c027d45615b0f6dc2d2d7ffcf97947";
+const CONSUMER_KEY = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
+const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
 const roundHalfUp = (n: number) => (n >= 0 ? Math.floor(n + 0.5) : -Math.floor(-n + 0.5));
 const toCents = (amount: any) => roundHalfUp(parseFloat(String(amount ?? 0)) * 100);
