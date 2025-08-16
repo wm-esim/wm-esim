@@ -118,9 +118,9 @@ const discount = Number(orderInfo?.discount) || 0;
     ItemDesc: "虛擬商品訂單",
     Email: orderInfo.email || "test@example.com",
     LoginType: "0",
-    ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
-    NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
-    ClientBackURL: "https://www.wmesim.com/thank-you",
+    ReturnURL: "https://www.wmesim.com/api/newebpay-callback/",
+    NotifyURL: "https://www.wmesim.com/api/newebpay-notify/",
+    ClientBackURL: "https://www.wmesim.com/thank-you/",
     PaymentMethod: "CREDIT",
   };
 
