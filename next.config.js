@@ -3,7 +3,7 @@ const path = require("path");
 module.exports = {
   images: {
     remotePatterns: [
-       {
+      {
         protocol: "https",
         hostname: "fegoesim.com",
         pathname: "/wp-content/uploads/**",
@@ -31,14 +31,16 @@ module.exports = {
   sassOptions: {
     includePaths: [path.join(__dirname, "styles")],
   },
-  // async rewrites() {
-  //   return [
-  //     {
-  //       source: "/api/:path*",
-  //       destination: "https://external-api.com/:path*",
-  //     },
-  //   ];
-  // },
+
+  async rewrites() {
+    return [
+      // ✅ 讓 /api/newebpay-notify（無斜線）直接 rewrite 到 /api/newebpay-notify/（有斜線）
+      {
+        source: "/api/newebpay-notify",
+        destination: "/api/newebpay-notify/",
+      },
+    ];
+  },
 
   // ⬇️ 加入 WebGL Shader 支援設定
   webpack(config) {
