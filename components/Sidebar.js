@@ -1,10 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useCart } from "./context/CartContext";
 import { motion, AnimatePresence } from "framer-motion";
 import Image from "next/image";
-import Link from "next/link";
 
 const Sidebar = () => {
   const {
@@ -14,13 +13,39 @@ const Sidebar = () => {
     updateQuantity,
     isOpen,
     setIsOpen,
+    // ✅ 不要在這裡用 clearCart
+    // clearCart,
   } = useCart();
 
+  const [checkingOut, setCheckingOut] = useState(false); // 防連點
   const toggleSidebar = () => setIsOpen(!isOpen);
 
   useEffect(() => {
     console.log("Sidebar state updated, isOpen:", isOpen);
   }, [isOpen]);
+
+  const handleCheckout = () => {
+    if (checkingOut) return;
+    setCheckingOut(true);
+
+    // 1) 關閉側邊欄（只關 UI，不清空資料）
+    setIsOpen(false);
+
+    // 2) 前往結帳頁（同分頁或新分頁擇一）
+
+    // 建議：同分頁導向，避免被瀏覽器攔截
+    window.location.href = "/Cart";
+
+    // 如果一定要新分頁，使用這段（但請留意彈窗攔截）
+    // try {
+    //   window.open("/Cart", "_blank", "noopener,noreferrer");
+    // } catch {
+    //   window.location.href = "/Cart";
+    // }
+
+    // 解除防連點
+    setTimeout(() => setCheckingOut(false), 1000);
+  };
 
   return (
     <AnimatePresence>
@@ -58,11 +83,7 @@ const Sidebar = () => {
                   stroke="currentColor"
                   strokeWidth={2}
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M6 18L18 6M6 6l12 12"
-                  />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
@@ -88,26 +109,17 @@ const Sidebar = () => {
                       {/* 商品資訊 */}
                       <div className="flex flex-col justify-between flex-1 text-sm text-right">
                         <div className="space-y-1">
-                          <p className="font-semibold break-words">
-                            {item.name}
-                          </p>
+                          <p className="font-semibold break-words">{item.name}</p>
                           <p className="text-xs text-gray-600">
                             顏色: {item.color}｜尺寸: {item.size}
                           </p>
                         </div>
                         <div className="mt-2 space-y-1">
-                          <p className="text-sm font-medium text-gray-800">
-                            ${item.price}
-                          </p>
+                          <p className="text-sm font-medium text-gray-800">${item.price}</p>
                           <div className="flex items-center justify-end space-x-2">
                             <button
                               onClick={() =>
-                                updateQuantity(
-                                  item.id,
-                                  item.color,
-                                  item.size,
-                                  item.quantity - 1
-                                )
+                                updateQuantity(item.id, item.color, item.size, item.quantity - 1)
                               }
                               className="px-2 border rounded text-gray-600"
                             >
@@ -116,12 +128,7 @@ const Sidebar = () => {
                             <span>{item.quantity}</span>
                             <button
                               onClick={() =>
-                                updateQuantity(
-                                  item.id,
-                                  item.color,
-                                  item.size,
-                                  item.quantity + 1
-                                )
+                                updateQuantity(item.id, item.color, item.size, item.quantity + 1)
                               }
                               className="px-2 border rounded text-gray-600"
                             >
@@ -129,9 +136,7 @@ const Sidebar = () => {
                             </button>
                           </div>
                           <button
-                            onClick={() =>
-                              removeFromCart(item.id, item.color, item.size)
-                            }
+                            onClick={() => removeFromCart(item.id, item.color, item.size)}
                             className="text-xs text-red-500 hover:underline"
                           >
                             刪除
@@ -146,16 +151,20 @@ const Sidebar = () => {
 
             {/* 底部結帳區塊 */}
             <div className="border-t border-gray-200 px-6 py-4">
-              <p className="text-right text-base font-semibold mb-4">
-                訂單總金額: ${totalPrice}
-              </p>
-              <Link
-                href="/Cart"
-                target="_blank"
-                className="block w-full text-center bg-[#20a2e3] text-white py-3 rounded-full hover:bg-[#3294c8] transition"
+              <p className="text-right text-base font-semibold mb-4">訂單總金額: ${totalPrice}</p>
+
+              {/* ✅ 不清空購物車，直接導到 Cart */}
+              <button
+                onClick={handleCheckout}
+                disabled={cartItems.length === 0 || checkingOut}
+                className={`block w-full text-center py-3 rounded-full transition ${
+                  cartItems.length === 0 || checkingOut
+                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    : "bg-[#20a2e3] text-white hover:bg-[#3294c8]"
+                }`}
               >
-                前往結帳
-              </Link>
+                {checkingOut ? "前往結帳中…" : "前往結帳"}
+              </button>
             </div>
           </motion.div>
         </motion.div>

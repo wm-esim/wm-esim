@@ -1,9 +1,9 @@
 // ✅ ThankYouPage.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
-import { useCart } from "@/components/context/CartContext"; // ✅ 引入購物車 context
+import { useCart } from "@/components/context/CartContext";
 
 interface QrcodeInfo {
   name: string;
@@ -24,27 +24,49 @@ export default function ThankYouPage() {
   const [qrcodes, setQrcodes] = useState<QrcodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const { clearCart } = useCart(); // ✅ 取得 clearCart 方法
+  const { clearCart } = useCart();
+
+  // 從 URL 取出 orderNo（只算一次）
+  const orderNo = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get("orderNo");
+  }, []);
+
+  // 防止在同一次瀏覽或重複 render 時「重複清空」
+  const clearedOnceRef = useRef(false);
+
+  // 成功判斷：後端回來的狀態只要代表「已付款」
+  const isPaid = (status?: string | null) => {
+    if (!status) return false;
+    const s = String(status).toLowerCase();
+    return (
+      s === "success" ||
+      s === "paid" ||
+      s === "successpaid" ||
+      s === "success_paid"
+    );
+  };
 
   useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const orderNo = urlParams.get("orderNo");
-
-    if (!orderNo) return;
+    if (!orderNo) {
+      setLoading(false);
+      return;
+    }
 
     const fetchQrcode = async () => {
       try {
         const res = await axios.get("/api/fetch-order", {
           params: { orderNo },
         });
-
-        const { qrcodes, orderInfo } = res.data;
+        const { qrcodes, orderInfo } = res.data ?? {};
 
         setOrderInfo(orderInfo || null);
-        setQrcodes(qrcodes || []);
+        setQrcodes(Array.isArray(qrcodes) ? qrcodes : []);
 
-        // ✅ 如果交易成功就清空購物車
-        if (orderInfo?.status === "SUCCESS" || orderInfo?.status === "paid") {
+        // ✅ 僅在「確定付款成功」且未清空過時執行 clearCart
+        if (!clearedOnceRef.current && isPaid(orderInfo?.status)) {
+          clearedOnceRef.current = true;
           clearCart();
         }
       } catch (err) {
@@ -55,7 +77,7 @@ export default function ThankYouPage() {
     };
 
     fetchQrcode();
-  }, [clearCart]);
+  }, [orderNo, clearCart]);
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-20">
