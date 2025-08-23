@@ -16,6 +16,41 @@ function normalizeSrc(raw: any): string {
     : `data:image/png;base64,${str}`;
 }
 
+// 決定是否為已付款（依 Woo 狀態 + 你在 notify 寫入的資訊）
+function computeIsPaid(order: any): boolean {
+  // Woo 常見已付狀態：processing / completed
+  const s = String(order?.status || "").toLowerCase();
+  if (s === "processing" || s === "completed") return true;
+
+  // 如果有 date_paid 也視為已付
+  if (order?.date_paid) return true;
+
+  // meta 若有你在 notify 時寫入的 pay time 也可視為已付
+  const meta: any[] = order?.meta_data || [];
+  const payTime = meta.find((m) => m?.key === "newebpay_pay_time")?.value;
+  if (payTime) return true;
+
+  return false;
+}
+
+// 將 Woo 狀態轉成前端友善字串（可自行調整）
+function statusLabel(order: any): string {
+  const s = String(order?.status || "").toLowerCase();
+  switch (s) {
+    case "processing":
+    case "completed":
+      return "SUCCESS";
+    case "on-hold":
+      return "PENDING";
+    case "failed":
+      return "FAILED";
+    case "cancelled":
+      return "CANCELLED";
+    default:
+      return s || "UNKNOWN";
+  }
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "GET") return res.status(405).end("Method Not Allowed");
 
@@ -35,31 +70,56 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       params: { per_page: 20, order: "desc", orderby: "date" },
     });
 
-    const order = orders.find((o: any) =>
+    const orderLite = orders.find((o: any) =>
       o?.meta_data?.some(
         (m: any) => m?.key === "newebpay_order_no" && m?.value === orderNo
       )
     );
 
-    if (!order) {
+    if (!orderLite) {
       return res.status(404).json({ error: "找不到訂單" });
     }
 
     // 2) 取單筆詳情（為了拿齊 meta 與 line_items）
-    const { data: fullOrder } = await axios.get(`${WC_API_URL}/${order.id}`, {
+    const { data: fullOrder } = await axios.get(`${WC_API_URL}/${orderLite.id}`, {
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
     });
 
     const meta: any[] = fullOrder?.meta_data || [];
     const lineItems: any[] = fullOrder?.line_items || [];
 
-    // 3) 組 orderInfo
+    // === 讀取藍新匯款/代碼資訊（在 notify/return 時寫入的 meta）===
+    let offsiteInfo: any = null;
+    const rawOffsite = meta.find((m) => m?.key === "newebpay_offsite_info")?.value;
+    if (rawOffsite) {
+      try {
+        offsiteInfo = typeof rawOffsite === "string" ? JSON.parse(rawOffsite) : rawOffsite;
+      } catch {
+        // 舊資料若是 querystring 或格式不正，這裡可再做容錯解析（目前略過）
+      }
+    }
+
+    // === 計算付款狀態 ===
+    const isPaid = computeIsPaid(fullOrder);
+    const paymentStatusLabel = statusLabel(fullOrder);
+
+    // 3) 組 orderInfo（維持你原本欄位 + 新增可讀性欄位）
     const orderInfo = {
-      status: fullOrder?.status ?? "",
+      status: paymentStatusLabel,                          // e.g. SUCCESS / PENDING / FAILED...
+      isPaid,                                              // boolean
       MerchantOrderNo: orderNo,
-      PaymentType: fullOrder?.payment_method_title ?? "",
-      PayTime: fullOrder?.date_paid ?? "",
-      TradeNo: fullOrder?.transaction_id ?? "",
+      PaymentType:
+        meta.find((m) => m?.key === "newebpay_payment_type")?.value ||
+        fullOrder?.payment_method_title ||
+        "",
+      PayTime:
+        meta.find((m) => m?.key === "newebpay_pay_time")?.value ||
+        fullOrder?.date_paid ||
+        "",
+      TradeNo:
+        meta.find((m) => m?.key === "newebpay_trade_no")?.value ||
+        fullOrder?.transaction_id ||
+        "",
     };
 
     // 4) 先嘗試讀「整包」 esim_qrcodes（建議的存法）
@@ -72,9 +132,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         if (Array.isArray(parsed)) {
           qrcodes = parsed
             .map((it: any, idx: number) => {
-              const name = typeof it?.name === "string" && it.name.trim()
-                ? it.name
-                : `eSIM #${idx + 1}`;
+              const name =
+                typeof it?.name === "string" && it.name.trim()
+                  ? it.name
+                  : `eSIM #${idx + 1}`;
               const src = normalizeSrc(it?.src);
               return src ? { name, src } : null;
             })
@@ -109,7 +170,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const name = li?.name || "eSIM";
         const metaArr: any[] = li?.meta_data || [];
 
-        // 支援兩種可能：
         // a) 每個 item 一個 esim_qrcode + item 的 quantity
         // b) 每個 item 有一個 esim_qrcodes（陣列或 JSON 字串），逐一展開
         const itemMulti = metaArr.find((m: any) => m?.key === "esim_qrcodes")?.value;
@@ -141,16 +201,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (fromItems.length) qrcodes = fromItems;
     }
 
-    // 7) 最終回傳
-    if (!qrcodes.length) {
-      return res.status(200).json({
-        orderInfo,
-        qrcodes: [],
-        message: "尚未找到任何 eSIM QRCode，請稍後再試或聯繫客服。",
-      });
-    }
-
-    return res.status(200).json({ qrcodes, orderInfo });
+    // 7) 最終回傳：把 offsiteInfo 一起帶給前端（若存在且未付款，就能展示匯款資訊）
+    return res.status(200).json({
+      orderInfo,
+      offsiteInfo, // 👈 ATM/超商等待繳資訊（可能包含 BankCode/CodeNo/PaymentNo/ExpireDate…）
+      qrcodes,
+      message:
+        qrcodes.length === 0
+          ? "尚未找到任何 eSIM QRCode，請稍後再試或聯繫客服。"
+          : undefined,
+    });
   } catch (err: any) {
     console.error("❌ WooCommerce 查詢失敗:", err?.response?.data || err.message);
     return res.status(500).json({

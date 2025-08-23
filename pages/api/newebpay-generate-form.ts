@@ -29,8 +29,11 @@ function shaEncrypt(encryptedText: string, key: string, iv: string) {
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
-const { items, orderInfo } = req.body;
-const discount = Number(orderInfo?.discount) || 0;
+  const { items, orderInfo } = req.body as {
+    items: Array<any>;
+    orderInfo: any;
+  };
+  const discount = Number(orderInfo?.discount) || 0;
 
   console.log("🛒 items:", items);
   console.log("🧾 orderInfo:", orderInfo);
@@ -41,54 +44,47 @@ const discount = Number(orderInfo?.discount) || 0;
   }, 0);
 
   const amount = Math.max(Math.round(rawAmount - Number(discount)), 0); // 不允許負值
-
-
   const orderNo = `ORDER${Date.now()}`;
 
   try {
     const wooPayload = {
-  payment_method: "newebpay",
-  payment_method_title: "藍新金流",
-  set_paid: false,
-  customer_id: orderInfo.customerId || 0,
-  billing: {
-    first_name: orderInfo.name,
-    email: orderInfo.email,
-    phone: orderInfo.phone,
-  },
-  line_items: items.map((item: any) => {
-    const lineItem: any = {
-      product_id: item.id,
-      quantity: item.quantity,
-      meta_data: [],
-      ...(item.variation_id && { variation_id: item.variation_id }),
+      payment_method: "newebpay",
+      payment_method_title: "藍新金流",
+      set_paid: false,
+      customer_id: orderInfo.customerId || 0,
+      billing: {
+        first_name: orderInfo.name,
+        email: orderInfo.email,
+        phone: orderInfo.phone,
+      },
+      line_items: items.map((item: any) => {
+        const lineItem: any = {
+          product_id: item.id,
+          quantity: item.quantity,
+          meta_data: [],
+          ...(item.variation_id && { variation_id: item.variation_id }),
+        };
+        if (item.planId) {
+          lineItem.meta_data.push({
+            key: "esim_plan_id",
+            value: item.planId,
+          });
+        }
+        return lineItem;
+      }),
+      coupon_lines: orderInfo.couponCode
+        ? [
+            {
+              code: orderInfo.couponCode, // ✅ 讓 Woo 自動套用優惠券
+            },
+          ]
+        : [],
+      meta_data: [
+        { key: "newebpay_order_no", value: orderNo },
+        { key: "discount_amount", value: discount },
+        ...(orderInfo.couponCode ? [{ key: "coupon_code", value: orderInfo.couponCode }] : []),
+      ],
     };
-
-    if (item.planId) {
-      lineItem.meta_data.push({
-        key: "esim_plan_id",
-        value: item.planId,
-      });
-    }
-
-    return lineItem;
-  }),
-  coupon_lines: orderInfo.couponCode
-    ? [
-        {
-          code: orderInfo.couponCode, // ✅ 這一行會觸發 WooCommerce 自動套用優惠券邏輯
-        },
-      ]
-    : [],
-  meta_data: [
-    { key: "newebpay_order_no", value: orderNo },
-    { key: "discount_amount", value: discount },
-    ...(orderInfo.couponCode
-      ? [{ key: "coupon_code", value: orderInfo.couponCode }]
-      : []),
-  ],
-};
-
 
     console.log("📦 即將傳送至 WooCommerce 的訂單資料：", JSON.stringify(wooPayload, null, 2));
 
@@ -107,8 +103,8 @@ const discount = Number(orderInfo?.discount) || 0;
     return res.status(500).json({ error: "WooCommerce 訂單建立失敗", details });
   }
 
-  // ✅ 建立藍新付款參數
-  const tradeInfoObj = {
+  // ✅ 建立藍新付款參數（開啟信用卡 / ATM 虛擬帳號 / WebATM / 超商代碼）
+  const tradeInfoObj: Record<string, string | number> = {
     MerchantID: MERCHANT_ID,
     RespondType: "JSON",
     TimeStamp: `${Math.floor(Date.now() / 1000)}`,
@@ -118,13 +114,31 @@ const discount = Number(orderInfo?.discount) || 0;
     ItemDesc: "虛擬商品訂單",
     Email: orderInfo.email || "test@example.com",
     LoginType: "0",
-    ReturnURL: "https://www.wmesim.com/api/newebpay-callback/",
+
+    // 🔔 回傳（前端導回）與背景通知
+    ReturnURL: "https://www.wmesim.com/api/newebpay-return/",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify/",
     ClientBackURL: "https://www.wmesim.com/thank-you/",
-    PaymentMethod: "CREDIT",
+
+    // ✅ 多付款方式旗標（1 = 啟用）
+    CREDIT: 1,
+    WEBATM: 1,
+    VACC: 1,
+    CVS: 1,
+
+    // (選用) 代碼/虛擬帳號有效期限（單位：分鐘）。這裡示範 1440 分 = 24 小時
+    // 可依你的商務需求調整或移除
+    ExpireDate: 1440,
   };
 
-  const tradeInfoStr = new URLSearchParams(tradeInfoObj).toString();
+  // 注意：URLSearchParams 會把 number 轉成字串，符合 MPG 需求
+  const tradeInfoStr = new URLSearchParams(
+    Object.entries(tradeInfoObj).reduce((acc, [k, v]) => {
+      acc[k] = String(v);
+      return acc;
+    }, {} as Record<string, string>)
+  ).toString();
+
   const encrypted = aesEncrypt(tradeInfoStr, HASH_KEY, HASH_IV);
   const tradeSha = shaEncrypt(encrypted, HASH_KEY, HASH_IV);
 
