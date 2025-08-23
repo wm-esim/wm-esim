@@ -42,6 +42,23 @@ const LoginRegisterPage = () => {
     }
   }, [successMessage]);
 
+  const stripTags = (html) =>
+    typeof html === "string"
+      ? html
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+      : "";
+
+  const safeParseJSON = async (res) => {
+    try {
+      return await res.json();
+    } catch {
+      const text = await res.text();
+      return { message: stripTags(text) || "登入失敗" };
+    }
+  };
+
   const handleLogin = async (e) => {
     e.preventDefault();
     setMessage("登入中...");
@@ -54,17 +71,26 @@ const LoginRegisterPage = () => {
           body: JSON.stringify(form),
         }
       );
-      const data = await res.json();
-      if (data.token) {
+      const data = await safeParseJSON(res);
+
+      if (data?.token) {
         localStorage.setItem("token", data.token);
         setToken(data.token);
         fetchUser(data.token);
         setMessage("登入成功！");
       } else {
-        setMessage(data.message || "登入失敗");
+        if (
+          data?.code === "invalid_username" ||
+          data?.code === "incorrect_password"
+        ) {
+          setMessage("帳號或密碼錯誤");
+        } else {
+          setMessage("帳號或密碼錯誤");
+        }
       }
     } catch (err) {
-      setMessage("登入失敗: " + err.message);
+      setMessage("登入失敗，請稍後再試");
+      console.error("Login error:", err);
     }
   };
 
@@ -152,7 +178,6 @@ const LoginRegisterPage = () => {
                 </button>
               </div>
 
-              {/* 成功註冊提示 */}
               {selected === "login" && successMessage && (
                 <div className="mb-4 p-2 text-center text-green-700 bg-green-100 rounded">
                   {successMessage}
@@ -213,7 +238,6 @@ const LoginRegisterPage = () => {
                       </button>
                     </form>
 
-                    {/* 忘記密碼入口 */}
                     <div className="mt-3 text-center">
                       <button
                         type="button"

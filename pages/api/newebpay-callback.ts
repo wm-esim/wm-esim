@@ -48,6 +48,7 @@ function aesDecrypt(encryptedText: string, key: string, iv: string): string {
   return decrypted;
 }
 
+/** ===== eSIM 寄信（保留） ===== */
 async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string): Promise<void> {
   const transporter = nodemailer.createTransport({
     service: "gmail",
@@ -63,38 +64,8 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
     html: `<p>您好，感謝您的購買！以下是您的 eSIM QRCode：</p><p>${imagesHtml}</p>`,
   });
 }
-/** ===== 發送發票 Email ===== */
-async function sendInvoiceEmail(to: string, orderNumber: string, inv: any): Promise<void> {
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: "wandmesim@gmail.com", pass: "hwoywmluqvsuluss" },
-  });
 
-  const qrL = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(inv.QRcodeL)}`;
-  const qrR = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(inv.QRcodeR)}`;
-
-  await transporter.sendMail({
-    from: `eSIM 團隊 <wandmesim@gmail.com>`,
-    to,
-    subject: `訂單 ${orderNumber} 發票通知（${inv.InvoiceNumber}）`,
-    html: `
-      <div style="font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.6">
-        <p>您好，您本次訂單（${orderNumber}）的電子發票已開立：</p>
-        <ul>
-          <li><b>發票號碼：</b>${inv.InvoiceNumber}</li>
-          <li><b>隨機碼：</b>${inv.RandomNum}</li>
-          <li><b>開立時間：</b>${inv.CreateTime}</li>
-        </ul>
-        <p>手機條碼掃描用 QR Code：</p>
-        <div style="display:flex;gap:16px;align-items:center">
-          <div><img src="${qrL}" alt="QR L"></div>
-          <div><img src="${qrR}" alt="QR R"></div>
-        </div>
-        <p style="margin-top:12px">若需紙本或異動，請回覆本信與我們聯繫，謝謝！</p>
-      </div>
-    `,
-  });
-}
+/* ======================= 主流程 ======================= */
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
   if (req.method !== "POST") {
     res.status(405).end("Method Not Allowed");
@@ -163,7 +134,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         })
         .join("<br />");
 
-      // 聚合陣列（給 ThankYou / 客服好讀）
       imageList.forEach((raw: string, i: number) => {
         const src = raw.startsWith("http") ? raw : `data:image/png;base64,${raw}`;
         qrcodes.push({ name: `${li.name} #${i + 1}`, src });
@@ -171,7 +141,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       allImagesHtml.push(`<div><strong>${li.name}</strong><br/>${imagesHtml}</div>`);
 
-      // 加註記（買家可見）
       await axios.post(
         `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
         { note: `<strong>eSIM QRCode (${li.name}):</strong><br />${imagesHtml}`, customer_note: true },
@@ -184,38 +153,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       `${WOOCOMMERCE_API_URL}/${orderId}`,
       {
         status: "processing",
-        meta_data: [
-          { key: "esim_qrcodes", value: JSON.stringify(qrcodes) }, // ★ 聚合存法
-        ],
+        meta_data: [{ key: "esim_qrcodes", value: JSON.stringify(qrcodes) }],
       },
       { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
     );
 
-    // 寄信
+    // 寄 eSIM 信（保留）
     const customerEmail: string = order.billing?.email;
     if (customerEmail && qrcodes.length) {
       await sendEsimEmail(customerEmail, orderNumber, allImagesHtml.join("<hr style='margin:16px 0'/>"));
     }
 
-    /** 3) 發票 — 用 cents 計算，支援固定金額/百分比折扣，不再額外加「折價 SAVE」行 */
+    /** 3) 發票：開立 + 寫 Woo（移除寄發票信） */
     const buyerName = `${order.billing?.first_name || ""}${order.billing?.last_name || ""}` || "網路訂單";
     const buyerEmail = order.billing?.email || "test@example.com";
     const timestamp = Math.floor(Date.now() / 1000).toString();
 
-    // (A) 以「未折扣小計 subtotal」作為分配基礎（Woo 會把 percent/fixed_cart 分到 order 層）
+    // (A) 以未折扣小計分配
     type BasisRow = { name: string; qty: number; subtotalCents: number };
     const basisRows: BasisRow[] = (fullOrder.line_items || []).map((li: any) => ({
       name: li.name,
       qty: li.quantity || 1,
-      subtotalCents: toCents(li.subtotal), // 未折扣小計
+      subtotalCents: toCents(li.subtotal),
     }));
-
     let sumSubtotalCents = basisRows.reduce((s, r) => s + r.subtotalCents, 0);
 
-    // (B) 訂單實付總額（含折扣）— 以金流回傳為準；若無則用 Woo total
+    // (B) 實付
     const totalPaidCents = toCents(result.Amt ?? fullOrder.total);
 
-    // 防呆：若 subtotal 全零（例如促銷全免），退回用 line_items.total
     if (sumSubtotalCents === 0) {
       for (const r of basisRows) {
         const li = (fullOrder.line_items || []).find((x: any) => x.name === r.name);
@@ -224,59 +189,55 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       sumSubtotalCents = basisRows.reduce((s, r) => s + r.subtotalCents, 0);
     }
 
-    // (C) 計算「需分配的折扣」（以分）
+    // (C) 折扣
     let discountTotalCents = Math.max(0, sumSubtotalCents - totalPaidCents);
 
-    // (D) 按比例把折扣分配到各品項，得到「品項實付分」
+    // (D) 分配
     const paidRows = basisRows.map((r, idx) => {
       if (sumSubtotalCents === 0) return { ...r, paidCents: 0 };
       const ratio = r.subtotalCents / sumSubtotalCents;
-      const allocDiscount = idx === basisRows.length - 1
-        ? discountTotalCents // 最後一項吃掉剩餘，避免四捨五入殘差
-        : Math.min(discountTotalCents, roundHalfUp(discountTotalCents * ratio));
+      const allocDiscount =
+        idx === basisRows.length - 1
+          ? discountTotalCents
+          : Math.min(discountTotalCents, roundHalfUp(discountTotalCents * ratio));
       discountTotalCents -= allocDiscount;
       const paid = Math.max(0, r.subtotalCents - allocDiscount);
       return { ...r, paidCents: paid };
     });
 
-    // (E) 校正合計（理論上相等；若不等，最後一項補差）
+    // (E) 校正
     let sumPaid = paidRows.reduce((s, r) => s + r.paidCents, 0);
     const diff = totalPaidCents - sumPaid;
     if (diff !== 0 && paidRows.length) {
       paidRows[paidRows.length - 1].paidCents = Math.max(0, paidRows[paidRows.length - 1].paidCents + diff);
       sumPaid = paidRows.reduce((s, r) => s + r.paidCents, 0);
     }
-// (F) 換算「每個 line item 的整體金額」為整數元，不再按單件拆分
-const itemNames: string[] = [];
-const itemCounts: string[] = [];
-const itemUnits: string[] = [];
-const itemPrices: string[] = [];
-const itemAmts: string[] = [];
 
-let acc = 0;
-paidRows.forEach((r, idx) => {
-  // lineCents = 該品項分配後的「整體」實付金額（分）
-  let lineCents = r.paidCents;
+    // (F) 發票品項（整品項為 1 單位）
+    const itemNames: string[] = [];
+    const itemCounts: string[] = [];
+    const itemUnits: string[] = [];
+    const itemPrices: string[] = [];
+    const itemAmts: string[] = [];
 
-  // 最後一項補差，確保 sum(item) == totalPaidCents
-  if (idx === paidRows.length - 1) {
-    const remain = totalPaidCents - (acc + lineCents);
-    lineCents += remain;
-  }
-  acc += lineCents;
+    let acc = 0;
+    paidRows.forEach((r, idx) => {
+      let lineCents = r.paidCents;
+      if (idx === paidRows.length - 1) {
+        const remain = totalPaidCents - (acc + lineCents);
+        lineCents += remain;
+      }
+      acc += lineCents;
+      const lineDollars = fromCents(lineCents);
+      itemNames.push(`${r.name} x${r.qty}`);
+      itemCounts.push("1");
+      itemUnits.push("項");
+      itemPrices.push(String(lineDollars));
+      itemAmts.push(String(lineDollars));
+    });
 
-  const lineDollars = fromCents(lineCents); // 轉整數元
-
-  // ✅ 發票上用「1」個單位開立，單價 = 小計 = 該品項整體金額
-  itemNames.push(`${r.name} x${r.qty}`); // 例如「馬來西亞 eSIM - 1天 500MB/日 x2」
-  itemCounts.push("1");
-  itemUnits.push("項");
-  itemPrices.push(String(lineDollars));
-  itemAmts.push(String(lineDollars));
-});
-
-    // (G) 稅額（以分計算，再轉元整數）
-    const taxRate = 5; // 應稅
+    // (G) 稅額
+    const taxRate = 5;
     const totalAmt_cents = totalPaidCents;
     const amtExclTax_cents = roundHalfUp(totalAmt_cents / (1 + taxRate / 100));
     const taxAmt_cents = totalAmt_cents - amtExclTax_cents;
@@ -298,9 +259,9 @@ paidRows.forEach((r, idx) => {
       LoveCode: "",
       TaxType: "1",
       TaxRate: taxRate,
-      Amt: fromCents(amtExclTax_cents),  // 整數元
-      TaxAmt: fromCents(taxAmt_cents),   // 整數元
-      TotalAmt: fromCents(totalAmt_cents), // 整數元
+      Amt: fromCents(amtExclTax_cents),
+      TaxAmt: fromCents(taxAmt_cents),
+      TotalAmt: fromCents(totalAmt_cents),
       ItemName: itemNames.join("|"),
       ItemCount: itemCounts.join("|"),
       ItemUnit: itemUnits.join("|"),
@@ -329,31 +290,32 @@ paidRows.forEach((r, idx) => {
 
     const invoiceJson = JSON.parse(invoiceRes.data.Result);
 
-    await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, {
-  note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
-  customer_note: false,
-}, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
+    // (1) Woo 訂單留言
+    await axios.post(
+      `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
+      {
+        note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
+        customer_note: false,
+      },
+      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+    );
 
-// (2) Woo meta 更新
-await axios.put(`${WOOCOMMERCE_API_URL}/${orderId}`, {
-  meta_data: [
-    { key: "invoice_number", value: invoiceJson.InvoiceNumber },
-    { key: "invoice_random", value: invoiceJson.RandomNum },
-    { key: "invoice_qrcode_l", value: invoiceJson.QRcodeL },
-    { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
-  ],
-}, { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } });
+    // (2) Woo Meta
+    await axios.put(
+      `${WOOCOMMERCE_API_URL}/${orderId}`,
+      {
+        meta_data: [
+          { key: "invoice_number", value: invoiceJson.InvoiceNumber },
+          { key: "invoice_random", value: invoiceJson.RandomNum },
+          { key: "invoice_qrcode_l", value: invoiceJson.QRcodeL },
+          { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
+        ],
+      },
+      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+    );
 
-// (3) ✅ 寄發票信（新增這段）
-if (customerEmail) {
-  try {
-    await sendInvoiceEmail(customerEmail, orderNumber, invoiceJson);
-    console.log(`📧 Invoice email sent to ${customerEmail} (${invoiceJson.InvoiceNumber})`);
-  } catch (mailErr: any) {
-    console.error("❌ 發票信寄送失敗：", mailErr?.response || mailErr?.message || mailErr);
-  }
-}
-
+    // (3) ✅ 寄發票信：已移除（改由原廠寄信）
+    // --- nothing here ---
 
     res.redirect(302, `/thank-you?status=success&orderNo=${orderNumber}`);
   } catch (error: any) {
