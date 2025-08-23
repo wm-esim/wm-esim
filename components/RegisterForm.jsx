@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const RegisterForm = ({ onSuccess }) => {
   const [form, setForm] = useState({
@@ -13,12 +13,24 @@ const RegisterForm = ({ onSuccess }) => {
   const [isCodeSent, setIsCodeSent] = useState(false);
   const [isCodeVerified, setIsCodeVerified] = useState(false);
 
+  // ✅ 新增：防止連點的 cooldown 狀態
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    let timer;
+    if (cooldown > 0) {
+      timer = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    }
+    return () => clearTimeout(timer);
+  }, [cooldown]);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSendCode = async () => {
+    if (cooldown > 0) return; // 如果還在冷卻，直接 return
     if (!form.email) return setMessage("請先輸入 Email");
 
     try {
@@ -32,6 +44,7 @@ const RegisterForm = ({ onSuccess }) => {
       if (res.ok) {
         setMessage("驗證碼已寄出，請查收 Email");
         setIsCodeSent(true);
+        setCooldown(10); // ✅ 發送成功 → 10 秒冷卻
       } else {
         setMessage(data.message || "驗證碼寄送失敗");
       }
@@ -130,9 +143,14 @@ const RegisterForm = ({ onSuccess }) => {
           <button
             type="button"
             onClick={handleSendCode}
-            className="px-4 py-2 bg-blue-500 text-white rounded-[10px]"
+            disabled={cooldown > 0}
+            className={`px-4 py-2 rounded-[10px] text-white ${
+              cooldown > 0
+                ? "bg-gray-400 cursor-not-allowed"
+                : "bg-blue-500 hover:bg-blue-600"
+            }`}
           >
-            發送驗證碼
+            {cooldown > 0 ? `請稍候 ${cooldown}s` : "發送驗證碼"}
           </button>
         </div>
 

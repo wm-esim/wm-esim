@@ -7,6 +7,16 @@ import Layout from "./Layout";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 
+/** 將任意金額字串/數字 → 四捨五入為整數並加上千分位 */
+const formatNTDNoDecimals = (val) => {
+  if (val == null) return "0";
+  // 允許傳入 "27.20"、"NT$27.20" 等；只保留數字與正負號與小數點
+  const n = Number(String(val).replace(/[^0-9.-]/g, ""));
+  if (!Number.isFinite(n)) return "0";
+  const rounded = Math.round(n); // 四捨五入
+  return rounded.toLocaleString("zh-TW"); // 千分位
+};
+
 const AccountPage = () => {
   const [userInfo, setUserInfo] = useState(null);
   const [orders, setOrders] = useState([]);
@@ -298,8 +308,10 @@ const AccountPage = () => {
                                       }[order.status] || order.status}
                                     </p>
 
+                                    {/* ✅ 總金額：四捨五入、不顯示小數 */}
                                     <p className="text-gray-100 text-sm">
-                                      總金額：NT${order.total}
+                                      總金額：NT$
+                                      {formatNTDNoDecimals(order.total)}
                                     </p>
 
                                     {/* ✅ 訂單建立時間（轉為當地時間格式） */}
@@ -309,8 +321,6 @@ const AccountPage = () => {
                                         order.date_created
                                       ).toLocaleString("zh-TW")}
                                     </p>
-
-                                    {/* ✅ 商品名稱（支援多件） */}
 
                                     {/* ✅ 顯示 QRCode 圖片（從 meta_data 抓取） */}
                                     {order.meta_data &&

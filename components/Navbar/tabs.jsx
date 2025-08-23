@@ -5,17 +5,20 @@ import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
-import { Menu, X } from "lucide-react";
 import MenuToggle from "../../components/Header/index";
-import { useRouter } from "next/router"; // ← 加上這行
+import { useRouter } from "next/router";
 
 export const SlideTabsExample = () => {
-  const router = useRouter(); // ← 加上這行
-  const [isMenuOpen, setIsMenuOpen] = useState(false); // mobile 菜單開關
-  const [isMenuActive, setIsMenuActive] = useState(false); // MenuToggle 狀態
-  const [isScrollingUp, setIsScrollingUp] = useState(true); // 滾動方向狀態
+  const router = useRouter();
+
+  // Mobile 選單與滾動狀態
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isMenuActive, setIsMenuActive] = useState(false);
+  const [isScrollingUp, setIsScrollingUp] = useState(true);
   const lastScrollY = useRef(0);
-  const { userInfo, logout } = useUser();
+
+  // 直接從 Context 拿狀態（新版 UserContext 會首幀就帶入 localStorage 值）
+  const { userInfo, isHydrated, logout } = useUser();
 
   const navLinks = [
     { label: "日本", href: "/category/japan/" },
@@ -27,22 +30,27 @@ export const SlideTabsExample = () => {
     { label: "旅遊精選", href: "/blog" },
   ];
 
-  // 監聽滾動方向
+  // 監聽滾動方向（顯示/隱藏導覽）
   useEffect(() => {
     const handleScroll = () => {
       const currentY = window.scrollY;
       if (currentY < 0) return;
       if (currentY > lastScrollY.current && currentY > 50) {
-        setIsScrollingUp(false); // 向下滾動
+        setIsScrollingUp(false);
       } else {
-        setIsScrollingUp(true); // 向上滾動
+        setIsScrollingUp(true);
       }
       lastScrollY.current = currentY;
     };
-
     window.addEventListener("scroll", handleScroll, { passive: true });
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
+
+  // 登出（交給 Context 處理清理 & 同步），再導回首頁
+  const handleLogout = () => {
+    logout?.();
+    router.push("/");
+  };
 
   return (
     <>
@@ -73,7 +81,7 @@ export const SlideTabsExample = () => {
             }}
             exit={{ opacity: 0, y: -10 }}
             transition={{ duration: 0.4 }}
-            className="fixed left-0 w-full top-6 z-[1000]"
+            className="fixed left-0 w-full top-6 z-[1200]"
           >
             <div className="flex justify-between items-center px-5 !rounded-[8px] bg-white py-[9.5px] mx-auto w-[96.5%] md:py-[9.5px]">
               {/* Logo */}
@@ -100,10 +108,10 @@ export const SlideTabsExample = () => {
                     className="group hover:bg-[#4badf4] relative h-10 rounded-full bg-transparent px-4 text-neutral-950"
                   >
                     <span className="relative inline-flex overflow-hidden">
-                      <div className="translate-y-0 mt-2 text-slate-500 skew-y-0 transition duration-500 group-hover:-translate-y-[150%] group-hover:skew-y-12">
+                      <div className="translate-y-0 mt-2 text-slate-500 transition duration-500 group-hover:-translate-y-[150%] group-hover:skew-y-12">
                         {link.label}
                       </div>
-                      <div className="absolute translate-y-[110%] mt-2 group-hover:text-white skew-y-2 transition duration-500 group-hover:translate-y-0 group-hover:skew-y-0">
+                      <div className="absolute translate-y-[110%] mt-2 group-hover:text-white transition duration-500 group-hover:translate-y-0 group-hover:skew-y-0">
                         {link.label}
                       </div>
                     </span>
@@ -112,10 +120,10 @@ export const SlideTabsExample = () => {
               </div>
 
               {/* Right Side Icons */}
-              <div className=" w-[80%]  md:w-[20%]">
+              <div className="w-[80%] md:w-[20%]">
                 <div className="flex items-center justify-center gap-4">
                   {/* Cart */}
-                  <Link href="/Cart" className="hidden  md:flex">
+                  <Link href="/Cart" className="hidden md:flex">
                     <div className="flex items-center gap-2">
                       <span className="text-sm">Cart</span>
                       <img
@@ -126,9 +134,11 @@ export const SlideTabsExample = () => {
                     </div>
                   </Link>
 
-                  {/* Desktop User Info */}
+                  {/* Desktop User Info（以 Context + isHydrated 為準） */}
                   <div className="hidden md:flex items-center gap-3">
-                    {userInfo ? (
+                    {!isHydrated ? (
+                      <div className="w-[140px] h-[24px] rounded bg-black/5 animate-pulse" />
+                    ) : userInfo ? (
                       <>
                         <Link
                           href="/account"
@@ -144,10 +154,7 @@ export const SlideTabsExample = () => {
                           />
                         </Link>
                         <button
-                          onClick={() => {
-                            logout();
-                            router.push("/");
-                          }}
+                          onClick={handleLogout}
                           className="hover:opacity-80 transition"
                           title="登出"
                         >
@@ -171,20 +178,21 @@ export const SlideTabsExample = () => {
                   </div>
                 </div>
               </div>
+
               <div className="w-[20%] md:hidden"></div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* ✅ MenuToggle 固定右上角 */}
-      <div className="fixed top-4 right-4 z-[1100]">
+      {/* ✅ MenuToggle 固定右上角 → 僅手機顯示，避免覆蓋桌機按鈕 */}
+      <div className="fixed top-4 right-4 z-[1100] md:hidden">
         <MenuToggle isActive={isMenuActive} setIsActive={setIsMenuActive} />
       </div>
 
-      {/* ✅ Mobile 漢堡選單內容 */}
+      {/* ✅ Mobile 漢堡選單內容（選單開關 isMenuOpen 你自己的事件要記得觸發 setIsMenuOpen） */}
       <AnimatePresence>
-        {isMenuOpen && (
+        {isHydrated && isMenuOpen && (
           <motion.div
             initial={{ height: 0 }}
             animate={{ height: "auto" }}
@@ -204,12 +212,12 @@ export const SlideTabsExample = () => {
               ))}
               {userInfo ? (
                 <>
-                  <span className="text-sm text-slate-400 sm:text-slate-800">
+                  <span className="text-sm text-slate-200">
                     Hello, {userInfo.name}
                   </span>
                   <button
                     onClick={() => {
-                      logout();
+                      handleLogout();
                       setIsMenuOpen(false);
                     }}
                     className="px-3 py-1 bg-white text-[#3b57ff] rounded hover:bg-gray-100 transition"

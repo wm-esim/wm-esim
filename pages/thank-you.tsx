@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { useCart } from "@/components/context/CartContext"; // ✅ 引入購物車 context
 
 interface QrcodeInfo {
   name: string;
@@ -23,6 +24,8 @@ export default function ThankYouPage() {
   const [qrcodes, setQrcodes] = useState<QrcodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const { clearCart } = useCart(); // ✅ 取得 clearCart 方法
+
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const orderNo = urlParams.get("orderNo");
@@ -39,6 +42,11 @@ export default function ThankYouPage() {
 
         setOrderInfo(orderInfo || null);
         setQrcodes(qrcodes || []);
+
+        // ✅ 如果交易成功就清空購物車
+        if (orderInfo?.status === "SUCCESS" || orderInfo?.status === "paid") {
+          clearCart();
+        }
       } catch (err) {
         console.error("❌ 抓取訂單資料失敗", err);
       } finally {
@@ -47,7 +55,7 @@ export default function ThankYouPage() {
     };
 
     fetchQrcode();
-  }, []);
+  }, [clearCart]);
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-20">
