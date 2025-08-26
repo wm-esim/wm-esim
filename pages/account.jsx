@@ -341,18 +341,6 @@ const AccountPage = () => {
                     </button>
                   </li>
                   {/* ✅ 新增：繳費資訊 */}
-                  <li>
-                    <button
-                      onClick={() => setActiveTab("payment")}
-                      className={`block w-full text-left px-4 py-2 rounded-[5px] ${
-                        activeTab === "payment"
-                          ? "bg-[#1757FF] text-white font-bold"
-                          : "bg-white text-gray-700"
-                      }`}
-                    >
-                      繳費資訊
-                    </button>
-                  </li>
                 </ul>
               </div>
 
@@ -517,11 +505,12 @@ const AccountPage = () => {
                                         </span>
                                       </p>
                                       <p>
-                                        建立時間：
+                                        建立日期：
                                         {new Date(
                                           order.date_created
-                                        ).toLocaleString("zh-TW")}
+                                        ).toLocaleDateString("zh-TW")}
                                       </p>
+
                                       <p>
                                         付款方式：
                                         {payType || "—"}
