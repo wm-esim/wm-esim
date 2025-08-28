@@ -3,12 +3,12 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import crypto from "crypto";
 import axios, { AxiosError } from "axios";
 
-// 藍新金鑰（建議改成環境變數）
+// 🔐 藍新金鑰（建議改成環境變數）
 const MERCHANT_ID = "MS3788816305";
 const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
 const HASH_IV = "PKetlaZYZcZvlMmC";
 
-// WooCommerce API（建議改成環境變數）
+// 🔐 WooCommerce API（建議改成環境變數）
 const WOOCOMMERCE_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
 const CONSUMER_KEY = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
 const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
@@ -30,15 +30,16 @@ function shaEncrypt(encryptedText: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(plainText).digest("hex").toUpperCase();
 }
 
-// 將前端傳入的方法正規化為陣列（只保留可用清單）
+/* === 動態付款方式 === */
+// 可用的方法白名單（依你後台開通狀態調整）
 const SUPPORTED_METHODS = [
   "CREDIT",   // 信用卡
   "VACC",     // ATM 虛擬帳號
   "WEBATM",   // WebATM
   "CVS",      // 超商代碼
   "BARCODE",  // 超商條碼
-  "LINEPAY",  // LINE Pay（若你後台有開）
-  // 其他如: "APPLEPAY", "GOOGLEPAY"（需後台與商務開通後才有效）
+  "LINEPAY",  // LINE Pay（需後台開通）
+  // "APPLEPAY", "GOOGLEPAY" ...（若有開通再補）
 ];
 
 function normalizeMethods(input?: string | string[]): string[] {
@@ -60,8 +61,6 @@ function buildPaymentFlags(methods: string[]) {
     CVS: "0",
     BARCODE: "0",
     LINEPAY: "0",
-    // APPLEPAY: "0",
-    // GOOGLEPAY: "0",
   };
   methods.forEach(m => {
     if (m in flags) flags[m] = "1";
@@ -83,7 +82,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const amount = Math.max(Math.round(rawAmount - discount), 0); // 不允許負值
   const orderNo = `ORDER${Date.now()}`;
 
-  // 解析這次要開通的付款方式（前端可傳 orderInfo.method 或 orderInfo.methods）
+  // === 解析這次要開通的付款方式（前端可傳 orderInfo.method 或 orderInfo.methods） ===
   const methods = normalizeMethods(orderInfo?.methods ?? orderInfo?.method);
   const flags = buildPaymentFlags(methods);
   const paymentMethodValue = methods.join(",");
@@ -119,7 +118,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       meta_data: [
         { key: "newebpay_order_no", value: orderNo },
         { key: "discount_amount", value: discount },
-        { key: "newebpay_payment_methods", value: paymentMethodValue }, // 👉 紀錄本次開通的付款方式
+        { key: "newebpay_payment_methods", value: paymentMethodValue }, // 本次開通的付款方式
         ...(orderInfo?.couponCode
           ? [{ key: "coupon_code", value: orderInfo.couponCode }]
           : []),
@@ -139,8 +138,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   /* === Step2: 準備藍新 MPG 參數（動態付款方式） === */
-  // 是否需要繳費期限（ATM / 超商代碼 / 條碼才需要）
+  // 是否需要繳費期限（僅 VACC / CVS / BARCODE 需要）
   const needExpire = methods.some(m => ["VACC", "CVS", "BARCODE"].includes(m));
+
   const tradeInfoObj: Record<string, string> = {
     MerchantID: MERCHANT_ID,
     RespondType: "JSON",
@@ -152,10 +152,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     Email: orderInfo?.email || "test@example.com",
     LoginType: "0",
 
-    // ✅ 回傳網址（請確保這兩支有做解密與驗章）
+    // 回傳網址（請確保有做解密與驗章）
     ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
-    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}${createdOrderId ? `&orderId=${createdOrderId}` : ""}`,
+    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}${
+      createdOrderId ? `&orderId=${createdOrderId}` : ""
+    }`,
 
     // ✅ 動態付款方式
     PaymentMethod: paymentMethodValue,
@@ -166,9 +168,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     BARCODE: flags.BARCODE,
     LINEPAY: flags.LINEPAY,
 
-    // ✅ 繳費期限 (分鐘) — 僅對 VACC/CVS/BARCODE 有意義
+    // ✅ 繳費期限 (分鐘) — 只在 VACC/CVS/BARCODE 有意義
     ...(needExpire ? { ExpireDate: String(orderInfo?.expireMinutes ?? 1440) } : {}),
   };
+
+  // （可選）除錯：上線後建議關閉
+  // console.log("[NewebPay MPG params]", tradeInfoObj);
 
   // MPG 要 x-www-form-urlencoded 格式字串
   const tradeInfoStr = new URLSearchParams(tradeInfoObj).toString();
