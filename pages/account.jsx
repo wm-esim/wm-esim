@@ -16,13 +16,14 @@ const formatNTDNoDecimals = (val) => {
   return rounded.toLocaleString("zh-TW");
 };
 
+/** 狀態中文 */
 const statusLabel = (status) =>
   ({
     processing: "已付款完成",
     pending: "待付款",
     completed: "已完成",
     cancelled: "已取消",
-    on_hold: "待處理",
+    on_hold: "待付款", // 調整成待付款（原本是待處理）
     refunded: "已退款",
     failed: "付款失敗",
   }[status] || status);
@@ -89,6 +90,10 @@ function readQRCodes(meta, namePrefix = "eSIM") {
   return results;
 }
 
+/** 把字串日期轉成在地時間（有些回傳是 "YYYY-MM-DD hh:mm:ss"） */
+const fmtDT = (s) =>
+  s ? new Date(s.replace(/-/g, "/")).toLocaleString("zh-TW") : "—";
+
 const AccountPage = () => {
   const [userInfo, setUserInfo] = useState(null);
   const [orders, setOrders] = useState([]);
@@ -120,6 +125,7 @@ const AccountPage = () => {
     }
   };
 
+  // 讀會員與訂單
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
@@ -141,11 +147,15 @@ const AccountPage = () => {
       })
       .then((res) => res.json())
       .then((data) => {
-        if (Array.isArray(data)) {
-          setOrders(data);
-        } else {
-          setOrders([]);
-        }
+        const list = Array.isArray(data) ? data : [];
+        setOrders(list);
+        // 只要有 pending/on_hold 且帶有 offsite 資訊，就自動切到繳費分頁
+        const hasPending = list.some(
+          (o) =>
+            ["pending", "on_hold"].includes(o.status) &&
+            !!readOffsiteInfo(o.meta_data || [])
+        );
+        if (hasPending) setActiveTab("payment");
       })
       .catch(() => router.push("/login"));
 
@@ -154,6 +164,19 @@ const AccountPage = () => {
     );
     setFavorites(storedFavorites);
   }, [router]);
+
+  // 在繳費分頁時每 15 秒刷新一次訂單狀態
+  useEffect(() => {
+    if (activeTab !== "payment" || !userInfo?.id) return;
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/get-orders?userId=${userInfo.id}`);
+        const list = await res.json();
+        if (Array.isArray(list)) setOrders(list);
+      } catch {}
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [activeTab, userInfo?.id]);
 
   const handleProfileUpdate = async () => {
     const token = localStorage.getItem("token");
@@ -192,7 +215,7 @@ const AccountPage = () => {
   if (!userInfo)
     return <p className="mt-40 text-center">正在載入會員資料...</p>;
 
-  // ==== 新增：繳費資訊卡片（抽成元件樣式，但保持原本白底面板風格）====
+  // ==== 繳費資訊卡片 ====
   const OffsiteCard = ({ offsite }) => {
     if (!offsite) return null;
 
@@ -233,7 +256,7 @@ const AccountPage = () => {
             {!!offsite.Amt && (
               <p>應繳金額：NT${formatNTDNoDecimals(offsite.Amt)}</p>
             )}
-            <p>繳費期限：{offsite.ExpireDate || "—"}</p>
+            <p>繳費期限：{fmtDT(offsite.ExpireDate)}</p>
           </div>
         )}
 
@@ -255,7 +278,7 @@ const AccountPage = () => {
             {!!offsite.Amt && (
               <p>應繳金額：NT${formatNTDNoDecimals(offsite.Amt)}</p>
             )}
-            <p>繳費期限：{offsite.ExpireDate || "—"}</p>
+            <p>繳費期限：{fmtDT(offsite.ExpireDate)}</p>
           </div>
         )}
 
@@ -277,7 +300,9 @@ const AccountPage = () => {
             {!!offsite?.Amt && (
               <p>應繳金額：NT${formatNTDNoDecimals(offsite.Amt)}</p>
             )}
-            {!!offsite?.ExpireDate && <p>繳費期限：{offsite.ExpireDate}</p>}
+            {!!offsite?.ExpireDate && (
+              <p>繳費期限：{fmtDT(offsite.ExpireDate)}</p>
+            )}
           </div>
         )}
 
@@ -292,9 +317,9 @@ const AccountPage = () => {
     <Layout>
       <div className=" bg-[#f7f8f9] flex flex-col justify-center items-center">
         <div className="w-full py-20">
-          <div className="dashdoard   max-w-[1920px] w-[95%] xl:w-[85%] mx-auto py-8 2xl:py-20">
+          <div className="dashdoard max-w-[1920px] w-[95%] xl:w-[85%] mx-auto py-8 2xl:py-20">
             {/* 麵包屑 */}
-            <div className="navgation flex max-w-[1920px]  w-[80%] mb-8">
+            <div className="navgation flex max-w-[1920px] w-[80%] mb-8">
               <Link href="/" className="group">
                 <span className="text-slate-500 text-[16px] group-hover:text-[#1757FF] group-hover:font-bold duration-300">
                   回首頁
@@ -340,7 +365,19 @@ const AccountPage = () => {
                       QR Code 訂單
                     </button>
                   </li>
-                  {/* ✅ 新增：繳費資訊 */}
+                  {/* ✅ 新增：繳費資訊分頁按鈕 */}
+                  <li>
+                    <button
+                      onClick={() => setActiveTab("payment")}
+                      className={`block w-full text-left px-4 py-2 rounded-[5px] ${
+                        activeTab === "payment"
+                          ? "bg-[#1757FF] text-white font-bold"
+                          : "bg-white text-gray-700"
+                      }`}
+                    >
+                      繳費資訊
+                    </button>
+                  </li>
                 </ul>
               </div>
 
@@ -510,11 +547,7 @@ const AccountPage = () => {
                                           order.date_created
                                         ).toLocaleDateString("zh-TW")}
                                       </p>
-
-                                      <p>
-                                        付款方式：
-                                        {payType || "—"}
-                                      </p>
+                                      <p>付款方式：{payType || "—"}</p>
                                     </div>
 
                                     {/* eSIM QRCode（若有） */}
@@ -552,7 +585,7 @@ const AccountPage = () => {
                     </motion.div>
                   )}
 
-                  {/* ✅ 新分頁：繳費資訊（只列出 pending / on_hold 且有 offsite 的訂單） */}
+                  {/* 繳費資訊（只列出 pending/on_hold 且有 offsite 的訂單） */}
                   {activeTab === "payment" && (
                     <motion.div
                       key="payment"
@@ -621,10 +654,7 @@ const AccountPage = () => {
                                               {formatNTDNoDecimals(order.total)}
                                             </span>
                                           </p>
-                                          <p>
-                                            付款方式：
-                                            {payType || "—"}
-                                          </p>
+                                          <p>付款方式：{payType || "—"}</p>
                                         </div>
 
                                         <OffsiteCard offsite={offsite} />
