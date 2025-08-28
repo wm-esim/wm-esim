@@ -1,19 +1,15 @@
-// /pages/api/newebpay-order.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import crypto from "crypto";
 import axios, { AxiosError } from "axios";
 
-// 🔐 藍新金鑰（建議改成環境變數）
 const MERCHANT_ID = "MS3788816305";
 const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
 const HASH_IV = "PKetlaZYZcZvlMmC";
 
-// 🔐 WooCommerce API（建議改成環境變數）
 const WOOCOMMERCE_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
 const CONSUMER_KEY = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
 const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
-/* === 工具：AES 加密 + SHA256 === */
 function aesEncrypt(data: string, key: string, iv: string) {
   const cipher = crypto.createCipheriv(
     "aes-256-cbc",
@@ -30,75 +26,36 @@ function shaEncrypt(encryptedText: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(plainText).digest("hex").toUpperCase();
 }
 
-/* === 動態付款方式 === */
-// 可用的方法白名單（依你後台開通狀態調整）
-const SUPPORTED_METHODS = [
-  "CREDIT",   // 信用卡
-  "VACC",     // ATM 虛擬帳號
-  "WEBATM",   // WebATM
-  "CVS",      // 超商代碼
-  "BARCODE",  // 超商條碼
-  "LINEPAY",  // LINE Pay（需後台開通）
-  // "APPLEPAY", "GOOGLEPAY" ...（若有開通再補）
-];
-
-function normalizeMethods(input?: string | string[]): string[] {
-  if (!input) return ["CREDIT"]; // 預設只開信用卡
-  const arr = Array.isArray(input) ? input : String(input).split(",");
-  const uniq = Array.from(
-    new Set(arr.map(s => String(s).trim().toUpperCase()).filter(Boolean))
-  );
-  const filtered = uniq.filter(m => SUPPORTED_METHODS.includes(m));
-  return filtered.length ? filtered : ["CREDIT"];
-}
-
-function buildPaymentFlags(methods: string[]) {
-  // 先全部給 "0"
-  const flags: Record<string, string> = {
-    CREDIT: "0",
-    VACC: "0",
-    WEBATM: "0",
-    CVS: "0",
-    BARCODE: "0",
-    LINEPAY: "0",
-  };
-  methods.forEach(m => {
-    if (m in flags) flags[m] = "1";
-  });
-  return flags;
-}
-
-/* === API 主函式 === */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
-  const { items, orderInfo } = req.body as { items: any[]; orderInfo: any };
+  const { items, orderInfo } = req.body as {
+    items: Array<any>;
+    orderInfo: any;
+  };
   const discount = Number(orderInfo?.discount) || 0;
 
-  // === 計算金額 ===
+  console.log("🛒 items:", items);
+  console.log("🧾 orderInfo:", orderInfo);
+  console.log("💸 discount:", discount);
+
   const rawAmount = items.reduce((total: number, item: any) => {
     return total + Number(item.price) * Number(item.quantity);
   }, 0);
-  const amount = Math.max(Math.round(rawAmount - discount), 0); // 不允許負值
+
+  const amount = Math.max(Math.round(rawAmount - Number(discount)), 0); // 不允許負值
   const orderNo = `ORDER${Date.now()}`;
 
-  // === 解析這次要開通的付款方式（前端可傳 orderInfo.method 或 orderInfo.methods） ===
-  const methods = normalizeMethods(orderInfo?.methods ?? orderInfo?.method);
-  const flags = buildPaymentFlags(methods);
-  const paymentMethodValue = methods.join(",");
-
-  /* === Step1: 建 WooCommerce 訂單 === */
-  let createdOrderId: number | null = null;
   try {
     const wooPayload = {
       payment_method: "newebpay",
       payment_method_title: "藍新金流",
-      set_paid: false, // 先不標記已付款
-      customer_id: orderInfo?.customerId || 0,
+      set_paid: false,
+      customer_id: orderInfo.customerId || 0,
       billing: {
-        first_name: orderInfo?.name,
-        email: orderInfo?.email,
-        phone: orderInfo?.phone,
+        first_name: orderInfo.name,
+        email: orderInfo.email,
+        phone: orderInfo.phone,
       },
       line_items: items.map((item: any) => {
         const lineItem: any = {
@@ -108,40 +65,46 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           ...(item.variation_id && { variation_id: item.variation_id }),
         };
         if (item.planId) {
-          lineItem.meta_data.push({ key: "esim_plan_id", value: item.planId });
+          lineItem.meta_data.push({
+            key: "esim_plan_id",
+            value: item.planId,
+          });
         }
         return lineItem;
       }),
-      coupon_lines: orderInfo?.couponCode
-        ? [{ code: orderInfo.couponCode }]
+      coupon_lines: orderInfo.couponCode
+        ? [
+            {
+              code: orderInfo.couponCode, // ✅ 讓 Woo 自動套用優惠券
+            },
+          ]
         : [],
       meta_data: [
         { key: "newebpay_order_no", value: orderNo },
         { key: "discount_amount", value: discount },
-        { key: "newebpay_payment_methods", value: paymentMethodValue }, // 本次開通的付款方式
-        ...(orderInfo?.couponCode
-          ? [{ key: "coupon_code", value: orderInfo.couponCode }]
-          : []),
+        ...(orderInfo.couponCode ? [{ key: "coupon_code", value: orderInfo.couponCode }] : []),
       ],
     };
 
+    console.log("📦 即將傳送至 WooCommerce 的訂單資料：", JSON.stringify(wooPayload, null, 2));
+
     const wcRes = await axios.post(WOOCOMMERCE_API_URL, wooPayload, {
-      auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
+      auth: {
+        username: CONSUMER_KEY,
+        password: CONSUMER_SECRET,
+      },
     });
-    createdOrderId = wcRes.data?.id ?? null;
-    console.log("✅ WooCommerce 訂單建立成功：", createdOrderId);
+
+    console.log("✅ WooCommerce 訂單建立成功：", wcRes.data);
   } catch (err) {
     const error = err as AxiosError;
-    const details = (error.response?.data as any) || error.message || error;
+    const details = error.response?.data || error.message || error;
     console.error("❌ WooCommerce 訂單建立失敗：", details);
     return res.status(500).json({ error: "WooCommerce 訂單建立失敗", details });
   }
 
-  /* === Step2: 準備藍新 MPG 參數（動態付款方式） === */
-  // 是否需要繳費期限（僅 VACC / CVS / BARCODE 需要）
-  const needExpire = methods.some(m => ["VACC", "CVS", "BARCODE"].includes(m));
-
-  const tradeInfoObj: Record<string, string> = {
+  // ✅ 建立藍新付款參數（開啟信用卡 / ATM 虛擬帳號 / WebATM / 超商代碼）
+  const tradeInfoObj: Record<string, string | number> = {
     MerchantID: MERCHANT_ID,
     RespondType: "JSON",
     TimeStamp: `${Math.floor(Date.now() / 1000)}`,
@@ -149,38 +112,36 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     MerchantOrderNo: orderNo,
     Amt: String(amount),
     ItemDesc: "虛擬商品訂單",
-    Email: orderInfo?.email || "test@example.com",
+    Email: orderInfo.email || "test@example.com",
     LoginType: "0",
 
-    // 回傳網址（請確保有做解密與驗章）
-    ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
+    // 🔔 回傳（前端導回）與背景通知
+     ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
-    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}${
-      createdOrderId ? `&orderId=${createdOrderId}` : ""
-    }`,
+    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`,
 
-    // ✅ 動態付款方式
-    PaymentMethod: paymentMethodValue,
-    CREDIT: flags.CREDIT,
-    VACC: flags.VACC,
-    WEBATM: flags.WEBATM,
-    CVS: flags.CVS,
-    BARCODE: flags.BARCODE,
-    LINEPAY: flags.LINEPAY,
+    // ✅ 多付款方式旗標（1 = 啟用）
+    CREDIT: 1,
+    WEBATM: 1,
+    VACC: 1,
+    CVS: 1,
 
-    // ✅ 繳費期限 (分鐘) — 只在 VACC/CVS/BARCODE 有意義
-    ...(needExpire ? { ExpireDate: String(orderInfo?.expireMinutes ?? 1440) } : {}),
+    // (選用) 代碼/虛擬帳號有效期限（單位：分鐘）。這裡示範 1440 分 = 24 小時
+    // 可依你的商務需求調整或移除
+    ExpireDate: 1440,
   };
 
-  // （可選）除錯：上線後建議關閉
-  // console.log("[NewebPay MPG params]", tradeInfoObj);
+  // 注意：URLSearchParams 會把 number 轉成字串，符合 MPG 需求
+  const tradeInfoStr = new URLSearchParams(
+    Object.entries(tradeInfoObj).reduce((acc, [k, v]) => {
+      acc[k] = String(v);
+      return acc;
+    }, {} as Record<string, string>)
+  ).toString();
 
-  // MPG 要 x-www-form-urlencoded 格式字串
-  const tradeInfoStr = new URLSearchParams(tradeInfoObj).toString();
   const encrypted = aesEncrypt(tradeInfoStr, HASH_KEY, HASH_IV);
   const tradeSha = shaEncrypt(encrypted, HASH_KEY, HASH_IV);
 
-  /* === Step3: 回傳自動送出表單 === */
   const html = `
     <form id="newebpay-form" method="post" action="https://core.newebpay.com/MPG/mpg_gateway">
       <input type="hidden" name="MerchantID" value="${MERCHANT_ID}" />
