@@ -30,6 +30,8 @@ const toCents   = (amount: any) => roundHalfUp(parseFloat(String(amount || 0)) *
 const fromCents = (c: number)   => roundHalfUp(c / 100);
 
 /** ===== 共用小工具 ===== */
+const wcAuth = { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } };
+
 function shaEncrypt(encryptedText: string, key: string, iv: string) {
   const plainText = `HashKey=${key}&${encryptedText}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(plainText).digest("hex").toUpperCase();
@@ -105,11 +107,61 @@ function isPaid(result: any, status: string | undefined) {
   return !!result?.PayTime || (payType === "CREDIT" && status === "SUCCESS");
 }
 
+/** === 依 newebpay_order_no 找 Woo 訂單（分頁，最多 1000 筆） === */
+async function findWooOrderByNewebpayNo(merchantOrderNo: string): Promise<any | null> {
+  const perPage = 100;
+  for (let page = 1; page <= 10; page++) {
+    const { data: orders } = await axios.get(WOOCOMMERCE_API_URL, {
+      ...wcAuth, params: { per_page: perPage, page, orderby: "date", order: "desc" },
+    });
+    const hit = (orders || []).find((o: any) =>
+      Array.isArray(o?.meta_data) &&
+      o.meta_data.some((m: any) => m?.key === "newebpay_order_no" && m?.value === merchantOrderNo)
+    );
+    if (hit) return hit;
+    if (!orders || orders.length < perPage) break;
+  }
+  return null;
+}
+
+/** === 冪等更新：狀態 + meta_data（若已存在同 key，改用 id 更新；否則新增） === */
+async function upsertOrderStatusAndMeta(order: any, patch: { status?: string, meta?: Record<string, string> }) {
+  const metaUpdates: any[] = [];
+  const meta = Array.isArray(order?.meta_data) ? order.meta_data : [];
+  if (patch.meta) {
+    for (const [key, value] of Object.entries(patch.meta)) {
+      const exist = meta.find((m: any) => m?.key === key);
+      if (exist && exist.value === value) continue;   // 一樣就跳過
+      if (exist && exist.id) metaUpdates.push({ id: exist.id, key, value });
+      else metaUpdates.push({ key, value });
+    }
+  }
+  const payload: any = {};
+  if (patch.status && patch.status !== order?.status) payload.status = patch.status;
+  if (metaUpdates.length) payload.meta_data = metaUpdates;
+  if (Object.keys(payload).length) {
+    await axios.put(`${WOOCOMMERCE_API_URL}/${order.id}`, payload, wcAuth);
+  }
+}
+
+/** === 寫一筆訂單備註（無害化） === */
+async function addOrderNote(orderId: number, note: string, customer_note = false) {
+  try {
+    await axios.post(`${WOOCOMMERCE_API_URL}/${orderId}/notes`, { note, customer_note }, wcAuth);
+  } catch {}
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
   try {
-    const { TradeInfo, TradeSha } = req.body || {};
+    // body 可能是 JSON 或 x-www-form-urlencoded
+    const ct = String(req.headers["content-type"] || "");
+    const body: any =
+      typeof req.body === "string" && ct.includes("application/x-www-form-urlencoded")
+        ? qs.parse(req.body)
+        : req.body || {};
+    const { TradeInfo, TradeSha } = body || {};
     if (!TradeInfo || !TradeSha) {
       return res.redirect(302, `/thank-you?status=fail`);
     }
@@ -117,7 +169,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // ✅ 驗章
     const calc = shaEncrypt(TradeInfo, HASH_KEY, HASH_IV);
     if (calc !== TradeSha) {
-      console.error("[callback] TradeSha mismatch");
+      await addOrderNote(0 as any, "[callback] TradeSha mismatch"); // 0: 並非真正寫入，只是保留格式
       return res.redirect(302, `/thank-you?status=fail`);
     }
 
@@ -132,62 +184,50 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.redirect(302, `/thank-you?status=fail`);
     }
 
-    // 1) 找 Woo 訂單
-    const { data: orders } = await axios.get(WOOCOMMERCE_API_URL, {
-      auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
-      params: { per_page: 20, orderby: "date", order: "desc" },
-    });
-    const order = (orders || []).find((o: any) =>
-      o?.meta_data?.some((m: any) => m?.key === "newebpay_order_no" && m?.value === orderNumber)
-    );
+    // 1) 找 Woo 訂單（含完整內容）
+    const order = await findWooOrderByNewebpayNo(orderNumber);
     if (!order) return res.redirect(302, `/thank-you?status=notfound&orderNo=${orderNumber}`);
+    const { data: fullOrder } = await axios.get(`${WOOCOMMERCE_API_URL}/${order.id}`, wcAuth);
 
-    const orderId = order.id;
-    const { data: fullOrder } = await axios.get(`${WOOCOMMERCE_API_URL}/${orderId}`, {
-      auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
-    });
-
-    // 2) 「待繳」類型（VACC/CVS/WEBATM）→ 只寫 offsite 資訊，狀態 on-hold，導回 pending
+    // 2) 「待繳」類型（VACC/CVS/WEBATM）→ 寫 offsite 資訊，狀態 on-hold
     const payType = String(result?.PaymentType || "").toUpperCase();
     const isOffsitePending = (payType === "VACC" || payType === "CVS" || payType === "WEBATM") && !result?.PayTime;
 
     if (isOffsitePending) {
       const offsiteInfo = buildOffsiteInfo(result);
-      await axios.put(
-        `${WOOCOMMERCE_API_URL}/${orderId}`,
-        {
-          status: "on-hold",
-          meta_data: [
-            { key: "newebpay_offsite_info", value: JSON.stringify(offsiteInfo) },
-            { key: "newebpay_payment_type", value: payType },
-            { key: "newebpay_expire_date",  value: String(offsiteInfo?.ExpireDate || "") },
-            { key: "newebpay_code_no",      value: String(offsiteInfo?.CodeNo || offsiteInfo?.PaymentNo || "") },
-            { key: "newebpay_bank_code",    value: String(offsiteInfo?.BankCode || "") },
-          ],
+
+      await upsertOrderStatusAndMeta(fullOrder, {
+        status: "on-hold",
+        meta: {
+          newebpay_offsite_info: JSON.stringify(offsiteInfo),
+          newebpay_payment_type: payType,
+          newebpay_expire_date:  String(offsiteInfo?.ExpireDate || ""),
+          newebpay_code_no:      String(offsiteInfo?.CodeNo || offsiteInfo?.PaymentNo || ""),
+          newebpay_bank_code:    String(offsiteInfo?.BankCode || ""),
         },
-        { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+      });
+
+      await addOrderNote(
+        order.id,
+        `🟡 取號成功（${payType}）\n銀行代碼: ${offsiteInfo.BankCode || "—"}\n代碼/帳號: ${offsiteInfo.CodeNo || offsiteInfo.PaymentNo || "—"}\n繳費期限: ${offsiteInfo.ExpireDate || "—"}\n金額: ${offsiteInfo.Amt ?? "—"}`
       );
+
       return res.redirect(302, `/thank-you?status=pending&orderNo=${orderNumber}`);
     }
 
     // 3) 已付款完成（信用卡或 ATM 真入帳）→ 設 processing、開 eSIM、開立發票（冪等）
     if (isPaid(result, status)) {
       // 3.1 更新付款 Meta（若已有就不重覆）
-      const existingPayTime = (fullOrder?.meta_data || []).find((m: any) => m?.key === "newebpay_pay_time")?.value;
-      if (!existingPayTime) {
-        await axios.put(
-          `${WOOCOMMERCE_API_URL}/${orderId}`,
-          {
-            status: "processing",
-            meta_data: [
-              { key: "newebpay_trade_no",   value: String(result?.TradeNo || "") },
-              { key: "newebpay_pay_time",   value: String(result?.PayTime || "") },
-              { key: "newebpay_payment_type", value: payType },
-            ],
-          },
-          { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-        );
-      }
+      await upsertOrderStatusAndMeta(fullOrder, {
+        status: "processing",
+        meta: {
+          newebpay_trade_no:     String(result?.TradeNo || ""),
+          newebpay_pay_time:     String(result?.PayTime || ""),
+          newebpay_payment_type: payType,
+        },
+      });
+
+      await addOrderNote(order.id, `✅ 已入帳（${payType}）\n金額: ${result?.Amt ?? fullOrder?.total}\n交易序號: ${result?.TradeNo || "—"}\n入帳時間: ${result?.PayTime || "—"}`);
 
       // 3.2 產 eSIM（若尚未產生）
       const alreadyHasEsim = (fullOrder?.meta_data || []).some((m: any) => m?.key === "esim_qrcodes");
@@ -222,18 +262,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
           allImagesHtml.push(`<div><strong>${li.name}</strong><br/>${imagesHtml}</div>`);
 
-          await axios.post(
-            `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
-            { note: `<strong>eSIM QRCode (${li.name}):</strong><br />${imagesHtml}`, customer_note: true },
-            { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-          );
+          await addOrderNote(order.id, `<strong>eSIM QRCode (${li.name}):</strong><br />${imagesHtml}`, true);
         }
 
         if (qrcodes.length) {
+          // upsert eSIM meta
+          const exist = (fullOrder?.meta_data || []).find((m: any) => m?.key === "esim_qrcodes");
           await axios.put(
-            `${WOOCOMMERCE_API_URL}/${orderId}`,
-            { meta_data: [{ key: "esim_qrcodes", value: JSON.stringify(qrcodes) }] },
-            { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+            `${WOOCOMMERCE_API_URL}/${order.id}`,
+            { meta_data: [ exist?.id ? { id: exist.id, key: "esim_qrcodes", value: JSON.stringify(qrcodes) } : { key: "esim_qrcodes", value: JSON.stringify(qrcodes) } ] },
+            wcAuth
           );
 
           const customerEmail: string = fullOrder?.billing?.email;
@@ -354,16 +392,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
         if (invoiceRes.data.Status === "SUCCESS") {
           const invoiceJson = JSON.parse(invoiceRes.data.Result);
-          await axios.post(
-            `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
-            {
-              note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
-              customer_note: false,
-            },
-            { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+          await addOrderNote(
+            order.id,
+            `🧾 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`
           );
           await axios.put(
-            `${WOOCOMMERCE_API_URL}/${orderId}`,
+            `${WOOCOMMERCE_API_URL}/${order.id}`,
             {
               meta_data: [
                 { key: "invoice_number",  value: invoiceJson.InvoiceNumber },
@@ -372,10 +406,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
                 { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
               ],
             },
-            { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+            wcAuth
           );
         } else {
-          console.error("發票開立失敗：", invoiceRes.data);
+          await addOrderNote(order.id, `❌ 發票開立失敗：${JSON.stringify(invoiceRes.data).slice(0, 800)}`);
         }
       }
 
