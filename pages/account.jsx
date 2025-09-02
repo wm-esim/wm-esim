@@ -7,6 +7,11 @@ import Layout from "./Layout";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 
+/* ========== 小工具 ========== */
+const log = (...args) => console.log("[Account]", ...args);
+const warn = (...args) => console.warn("[Account]", ...args);
+const error = (...args) => console.error("[Account]", ...args);
+
 /** 將任意金額字串/數字 → 四捨五入為整數並加上千分位 */
 const formatNTDNoDecimals = (val) => {
   if (val == null) return "0";
@@ -35,7 +40,8 @@ function readOffsiteInfo(meta) {
   if (!raw) return null;
   try {
     return typeof raw === "string" ? JSON.parse(raw) : raw;
-  } catch {
+  } catch (e) {
+    warn("解析 newebpay_offsite_info JSON 失敗，raw=", raw, e);
     return null;
   }
 }
@@ -77,7 +83,9 @@ function readQRCodes(meta, namePrefix = "eSIM") {
           if (src) results.push({ name: `${namePrefix} #${idx + 1}`, src });
         });
       }
-    } catch {}
+    } catch (e) {
+      warn("解析 esim_qrcodes 失敗：", e);
+    }
   } else if (single) {
     const src = normalizeSrc(single);
     if (src) {
@@ -94,6 +102,11 @@ function readQRCodes(meta, namePrefix = "eSIM") {
 const fmtDT = (s) =>
   s ? new Date(s.replace(/-/g, "/")).toLocaleString("zh-TW") : "—";
 
+/** ✅ 統一從 order 取 offsite（優先 order.offsiteInfo，退回解析 meta） */
+const getOffsiteFromOrder = (order) =>
+  order?.offsiteInfo || readOffsiteInfo(order?.meta_data || []);
+
+/* ========== 主頁面 ========== */
 const AccountPage = () => {
   const [userInfo, setUserInfo] = useState(null);
   const [orders, setOrders] = useState([]);
@@ -132,10 +145,28 @@ const AccountPage = () => {
       ...(u.email ? { email: String(u.email) } : {}),
     }).toString();
 
+    log("呼叫 /api/get-orders，query =", qs);
     const res = await fetch(`/api/get-orders?${qs}`);
-    if (!res.ok) throw new Error(`get-orders ${res.status}`);
+    if (!res.ok) {
+      error("get-orders 失敗，HTTP", res.status);
+      throw new Error(`get-orders ${res.status}`);
+    }
     const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    const list = Array.isArray(data) ? data : [];
+    // 列出每筆訂單摘要
+    log(
+      "get-orders 回傳筆數：",
+      list.length,
+      list.map((o) => ({
+        id: o.id,
+        status: o.status,
+        hasOffsite: !!getOffsiteFromOrder(o),
+        paymentType:
+          o.paymentType ||
+          readPaymentType(o.meta_data || [], o.payment_method_title),
+      }))
+    );
+    return list;
   }, []);
 
   // 讀會員與訂單（具備 token 403 的 fallback）
@@ -150,6 +181,7 @@ const AccountPage = () => {
     })();
 
     if (!token && !storedUser) {
+      warn("沒有 token 與 localStorage user → 導回登入頁");
       router.push("/login");
       return;
     }
@@ -159,18 +191,24 @@ const AccountPage = () => {
 
       if (token) {
         try {
+          log("以 token 呼叫 WP /users/me");
           const r = await fetch("https://fegoesim.com/wp-json/wp/v2/users/me", {
             headers: { Authorization: `Bearer ${token}` },
           });
-          if (!r.ok) throw new Error(`me ${r.status}`);
+          if (!r.ok) throw new Error(`users/me HTTP ${r.status}`);
           user = await r.json();
           localStorage.setItem("user", JSON.stringify(user));
-        } catch {
-          // 403 或 token 失效 → 退回 localStorage 的 user
+          log("users/me 成功，user.id =", user?.id, "email =", user?.email);
+        } catch (e) {
+          warn(
+            "users/me 失敗（常見 403 JWT 無效），改用 localStorage user。err =",
+            e?.message
+          );
         }
       }
 
       if (!user) {
+        warn("沒有 user 可用 → 導回登入頁");
         router.push("/login");
         return;
       }
@@ -180,43 +218,58 @@ const AccountPage = () => {
       setEditingPhone(user.meta?.billing_phone || "");
       setEditingName(user.name || "");
 
-      const list = await fetchOrders(user);
-      setOrders(list);
+      try {
+        const list = await fetchOrders(user);
+        setOrders(list);
 
-      // 有待繳且包含 offsite → 自動切到繳費分頁
-      const hasPending = list.some(
-        (o) =>
-          ["pending", "on_hold"].includes(o.status) &&
-          !!readOffsiteInfo(o.meta_data || [])
-      );
-      if (hasPending) setActiveTab("payment");
+        const hasPending = list.some(
+          (o) =>
+            ["pending", "on_hold"].includes(o.status) &&
+            !!getOffsiteFromOrder(o)
+        );
+        log("是否有待繳訂單(hasPending) =", hasPending);
+        if (hasPending) setActiveTab("payment");
+      } catch (e) {
+        error("抓訂單失敗：", e?.message);
+      }
     };
 
-    load().catch(() => router.push("/login"));
+    load().catch((e) => {
+      error("初始化 load() 例外：", e?.message);
+      router.push("/login");
+    });
 
     const fav = JSON.parse(localStorage.getItem("favorites") || "[]");
     setFavorites(fav);
   }, [router, fetchOrders]);
 
-  // 在繳費分頁時每 15 秒刷新一次訂單狀態（同時帶 userId+email）
+  // 在繳費分頁時每 15 秒刷新一次訂單狀態
   useEffect(() => {
     if (activeTab !== "payment" || !userInfo) return;
+    log("進入繳費分頁，啟動 15s 輪詢刷新訂單狀態");
     const timer = setInterval(async () => {
       try {
         const list = await fetchOrders(userInfo);
-        if (Array.isArray(list)) setOrders(list);
-      } catch {
-        // ignore
+        setOrders(list);
+      } catch (e) {
+        error("輪詢抓訂單失敗：", e?.message);
       }
     }, 15000);
-    return () => clearInterval(timer);
+    return () => {
+      log("離開繳費分頁，清除輪詢計時器");
+      clearInterval(timer);
+    };
   }, [activeTab, userInfo, fetchOrders]);
 
   const handleProfileUpdate = async () => {
     const token = localStorage.getItem("token");
-    if (!token || !userInfo?.id) return;
+    if (!token || !userInfo?.id) {
+      warn("缺少 token 或 user.id，無法更新會員資料");
+      return;
+    }
 
     try {
+      log("送出會員資料更新");
       const res = await fetch(
         `https://fegoesim.com/wp-json/wp/v2/users/${userInfo.id}`,
         {
@@ -234,15 +287,17 @@ const AccountPage = () => {
       );
       const data = await res.json();
       if (!data.code) {
+        log("會員資料更新成功");
         setUserInfo(data);
         setEditMode(false);
         localStorage.setItem("user", JSON.stringify(data));
         alert("會員資料更新成功");
       } else {
+        warn("會員資料更新失敗：", data);
         alert(data.message || "更新失敗");
       }
     } catch (err) {
-      console.error("更新會員資料時發生錯誤", err);
+      error("更新會員資料時發生錯誤", err);
     }
   };
 
@@ -534,15 +589,17 @@ const AccountPage = () => {
                             {orders.map((order) => {
                               const meta = order.meta_data || [];
                               const qrs = readQRCodes(meta);
-                              const payType = readPaymentType(
-                                meta,
-                                order.payment_method_title
-                              );
+                              const payType =
+                                order.paymentType ||
+                                readPaymentType(
+                                  meta,
+                                  order.payment_method_title
+                                );
 
                               return (
                                 <li
                                   key={order.id}
-                                  className="border border-gray-200 rounded bg-white shadow-sm p-4 flex flex-col justify-between h-full"
+                                  className="border border-gray-200 rounded bg白 shadow-sm p-4 flex flex-col justify-between h-full"
                                 >
                                   <div className="space-y-3">
                                     <div className="text-gray-700">
@@ -633,8 +690,13 @@ const AccountPage = () => {
                         <h2 className="text-2xl font-semibold">繳費資訊</h2>
                         <button
                           onClick={async () => {
-                            const list = await fetchOrders(userInfo);
-                            setOrders(list);
+                            try {
+                              const list = await fetchOrders(userInfo);
+                              setOrders(list);
+                              log("手動刷新完成，訂單數 =", list.length);
+                            } catch (e) {
+                              error("手動刷新失敗：", e?.message);
+                            }
                           }}
                           className="text-sm px-3 py-1 border rounded hover:bg-gray-50"
                         >
@@ -650,7 +712,7 @@ const AccountPage = () => {
                             const needPay = orders
                               .map((o) => ({
                                 order: o,
-                                offsite: readOffsiteInfo(o.meta_data || []),
+                                offsite: getOffsiteFromOrder(o),
                               }))
                               .filter(
                                 (x) =>
@@ -659,6 +721,16 @@ const AccountPage = () => {
                                     x.order.status
                                   )
                               );
+
+                            log(
+                              "繳費分頁 needPay 筆數 =",
+                              needPay.length,
+                              needPay.map((x) => ({
+                                id: x.order.id,
+                                status: x.order.status,
+                                offsite: x.offsite,
+                              }))
+                            );
 
                             if (needPay.length === 0) {
                               return (
@@ -671,10 +743,12 @@ const AccountPage = () => {
                             return (
                               <ul className="grid grid-cols-1 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3">
                                 {needPay.map(({ order, offsite }) => {
-                                  const payType = readPaymentType(
-                                    order.meta_data || [],
-                                    order.payment_method_title
-                                  );
+                                  const payType =
+                                    order.paymentType ||
+                                    readPaymentType(
+                                      order.meta_data || [],
+                                      order.payment_method_title
+                                    );
                                   return (
                                     <li
                                       key={order.id}
