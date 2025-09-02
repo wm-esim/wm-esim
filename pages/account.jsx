@@ -33,17 +33,52 @@ const statusLabel = (status) =>
     failed: "付款失敗",
   }[status] || status);
 
-/** 從 meta_data 取出 offsite 資訊（ATM/超商/其它代碼繳費） */
+/** 從 meta_data 取出 offsite 資訊（ATM/超商/其它代碼繳費）
+ * ① 先讀聚合 JSON: newebpay_offsite_info
+ * ② 若沒有，再從個別欄位（notify 寫入的欄位）拼出來
+ */
 function readOffsiteInfo(meta) {
   if (!Array.isArray(meta)) return null;
-  const raw = meta.find((m) => m?.key === "newebpay_offsite_info")?.value;
-  if (!raw) return null;
-  try {
-    return typeof raw === "string" ? JSON.parse(raw) : raw;
-  } catch (e) {
-    warn("解析 newebpay_offsite_info JSON 失敗，raw=", raw, e);
+
+  const findVal = (k) => meta.find((m) => m?.key === k)?.value;
+
+  // ① 聚合 JSON
+  const raw = findVal("newebpay_offsite_info");
+  if (raw) {
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      return parsed || null;
+    } catch (e) {
+      warn("解析 newebpay_offsite_info JSON 失敗，raw=", raw, e);
+    }
+  }
+
+  // ② 個別欄位備援（若 notify 只寫了單獨欄位）
+  const paymentType = findVal("newebpay_payment_type"); // e.g. VACC/CVS/WEBATM
+  const bankCode = findVal("newebpay_bank_code");
+  const codeNo = findVal("newebpay_code_no"); // ATM 虛擬帳號 / CVS 代碼
+  const expireDate = findVal("newebpay_expire_date");
+  const paymentNo = codeNo; // 顯示上相同用途
+  const storeType = findVal("newebpay_store_type");
+  const amt = findVal("newebpay_amt"); // 若沒寫入，就讓前端不顯示金額
+
+  // 若完全沒有關鍵欄位，視為沒有 offsite
+  if (!paymentType && !bankCode && !codeNo && !expireDate) {
     return null;
   }
+
+  const fallback = {
+    PaymentType: (paymentType || "").toUpperCase(),
+    BankCode: bankCode || "",
+    CodeNo: codeNo || "",
+    PaymentNo: paymentNo || "",
+    StoreType: storeType || "",
+    ExpireDate: expireDate || "",
+    ...(amt ? { Amt: String(amt) } : {}),
+  };
+
+  log("使用備援 offsite（由個別欄位拼回）=>", fallback);
+  return fallback;
 }
 
 /** 付款方式（若 meta 有 newebpay_payment_type 優先） */
@@ -458,7 +493,7 @@ const AccountPage = () => {
                   <li>
                     <button
                       onClick={() => setActiveTab("payment")}
-                      className={`block w-full text-left px-4 py-2 rounded-[5px] ${
+                      className={`block w-full text左 px-4 py-2 rounded-[5px] ${
                         activeTab === "payment"
                           ? "bg-[#1757FF] text-white font-bold"
                           : "bg-white text-gray-700"
@@ -599,7 +634,7 @@ const AccountPage = () => {
                               return (
                                 <li
                                   key={order.id}
-                                  className="border border-gray-200 rounded bg白 shadow-sm p-4 flex flex-col justify-between h-full"
+                                  className="border border-gray-200 rounded bg-white shadow-sm p-4 flex flex-col justify-between h-full"
                                 >
                                   <div className="space-y-3">
                                     <div className="text-gray-700">
