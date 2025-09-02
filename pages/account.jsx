@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/router";
 import Image from "next/image";
 import Layout from "./Layout";
@@ -23,7 +23,7 @@ const statusLabel = (status) =>
     pending: "待付款",
     completed: "已完成",
     cancelled: "已取消",
-    on_hold: "待付款", // 調整成待付款（原本是待處理）
+    on_hold: "待付款",
     refunded: "已退款",
     failed: "付款失敗",
   }[status] || status);
@@ -103,7 +103,6 @@ const AccountPage = () => {
   const [editingPhone, setEditingPhone] = useState("");
   const [editingName, setEditingName] = useState("");
   const [editMode, setEditMode] = useState(false);
-  const [selectedImage, setSelectedImage] = useState(null);
   const router = useRouter();
 
   const copyText = async (text) => {
@@ -125,58 +124,93 @@ const AccountPage = () => {
     }
   };
 
-  // 讀會員與訂單
+  /** 依 userId/email 抓訂單（同時帶兩者，讓後端可 fallback） */
+  const fetchOrders = useCallback(async (u) => {
+    if (!u) return [];
+    const qs = new URLSearchParams({
+      ...(u.id ? { userId: String(u.id) } : {}),
+      ...(u.email ? { email: String(u.email) } : {}),
+    }).toString();
+
+    const res = await fetch(`/api/get-orders?${qs}`);
+    if (!res.ok) throw new Error(`get-orders ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  }, []);
+
+  // 讀會員與訂單（具備 token 403 的 fallback）
   useEffect(() => {
     const token = localStorage.getItem("token");
-    if (!token) {
+    const storedUser = (() => {
+      try {
+        return JSON.parse(localStorage.getItem("user") || "null");
+      } catch {
+        return null;
+      }
+    })();
+
+    if (!token && !storedUser) {
       router.push("/login");
       return;
     }
 
-    fetch("https://fegoesim.com/wp-json/wp/v2/users/me", {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((res) => res.json())
-      .then((user) => {
-        setUserInfo(user);
-        setEditingEmail(user.email || "");
-        setEditingPhone(user.meta?.billing_phone || "");
-        setEditingName(user.name || "");
-        localStorage.setItem("user", JSON.stringify(user));
-        return fetch(`/api/get-orders?userId=${user.id}`);
-      })
-      .then((res) => res.json())
-      .then((data) => {
-        const list = Array.isArray(data) ? data : [];
-        setOrders(list);
-        // 只要有 pending/on_hold 且帶有 offsite 資訊，就自動切到繳費分頁
-        const hasPending = list.some(
-          (o) =>
-            ["pending", "on_hold"].includes(o.status) &&
-            !!readOffsiteInfo(o.meta_data || [])
-        );
-        if (hasPending) setActiveTab("payment");
-      })
-      .catch(() => router.push("/login"));
+    const load = async () => {
+      let user = storedUser;
 
-    const storedFavorites = JSON.parse(
-      localStorage.getItem("favorites") || "[]"
-    );
-    setFavorites(storedFavorites);
-  }, [router]);
+      if (token) {
+        try {
+          const r = await fetch("https://fegoesim.com/wp-json/wp/v2/users/me", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!r.ok) throw new Error(`me ${r.status}`);
+          user = await r.json();
+          localStorage.setItem("user", JSON.stringify(user));
+        } catch {
+          // 403 或 token 失效 → 退回 localStorage 的 user
+        }
+      }
 
-  // 在繳費分頁時每 15 秒刷新一次訂單狀態
+      if (!user) {
+        router.push("/login");
+        return;
+      }
+
+      setUserInfo(user);
+      setEditingEmail(user.email || "");
+      setEditingPhone(user.meta?.billing_phone || "");
+      setEditingName(user.name || "");
+
+      const list = await fetchOrders(user);
+      setOrders(list);
+
+      // 有待繳且包含 offsite → 自動切到繳費分頁
+      const hasPending = list.some(
+        (o) =>
+          ["pending", "on_hold"].includes(o.status) &&
+          !!readOffsiteInfo(o.meta_data || [])
+      );
+      if (hasPending) setActiveTab("payment");
+    };
+
+    load().catch(() => router.push("/login"));
+
+    const fav = JSON.parse(localStorage.getItem("favorites") || "[]");
+    setFavorites(fav);
+  }, [router, fetchOrders]);
+
+  // 在繳費分頁時每 15 秒刷新一次訂單狀態（同時帶 userId+email）
   useEffect(() => {
-    if (activeTab !== "payment" || !userInfo?.id) return;
+    if (activeTab !== "payment" || !userInfo) return;
     const timer = setInterval(async () => {
       try {
-        const res = await fetch(`/api/get-orders?userId=${userInfo.id}`);
-        const list = await res.json();
+        const list = await fetchOrders(userInfo);
         if (Array.isArray(list)) setOrders(list);
-      } catch {}
+      } catch {
+        // ignore
+      }
     }, 15000);
     return () => clearInterval(timer);
-  }, [activeTab, userInfo?.id]);
+  }, [activeTab, userInfo, fetchOrders]);
 
   const handleProfileUpdate = async () => {
     const token = localStorage.getItem("token");
@@ -595,7 +629,19 @@ const AccountPage = () => {
                       transition={{ duration: 0.3 }}
                       className=" top-0 left-0 w-full bg-white rounded-[6px] p-4 sm:p-8"
                     >
-                      <h2 className="text-2xl font-semibold mb-4">繳費資訊</h2>
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-2xl font-semibold">繳費資訊</h2>
+                        <button
+                          onClick={async () => {
+                            const list = await fetchOrders(userInfo);
+                            setOrders(list);
+                          }}
+                          className="text-sm px-3 py-1 border rounded hover:bg-gray-50"
+                        >
+                          重新整理
+                        </button>
+                      </div>
+
                       {orders.length === 0 ? (
                         <p>尚未下過任何訂單。</p>
                       ) : (
