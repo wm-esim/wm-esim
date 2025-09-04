@@ -1,169 +1,122 @@
+// /pages/api/get-orders.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import axios from "axios";
-import crypto from "crypto";
-import qs from "qs";
 
-/** ====== ENV ====== */
-const WC_BASE = process.env.WC_BASE || "https://fegoesim.com";
-const WC_API = `${WC_BASE}/wp-json/wc/v3/orders`;
-const WC_CK = process.env.WC_CK || process.env.NEXT_PUBLIC_WC_CONSUMER_KEY!;
-const WC_CS = process.env.WC_CS || process.env.NEXT_PUBLIC_WC_CONSUMER_SECRET!;
+const WC_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
 
-const NEWEBPAY_BASE = process.env.NEWEBPAY_BASE || "https://core.newebpay.com";
-const NEWEBPAY_QUERY_URL = `${NEWEBPAY_BASE}/API/QueryTradeInfo`;
-const MERCHANT_ID = process.env.NEWEBPAY_MERCHANT_ID!;
-const HASH_KEY = process.env.NEWEBPAY_HASH_KEY!;
-const HASH_IV = process.env.NEWEBPAY_HASH_IV!;
+// 建議在 .env 內用非 NEXT_PUBLIC 前綴（避免意外被前端引用）
+const CONSUMER_KEY = process.env.NEXT_PUBLIC_WC_CONSUMER_KEY!;
+const CONSUMER_SECRET = process.env.NEXT_PUBLIC_WC_CONSUMER_SECRET!;
 
-/** ====== helpers ====== */
-const log  = (...a: any[]) => console.log("[get-orders]", ...a);
-const warn = (...a: any[]) => console.warn("[get-orders]", ...a);
-const err  = (...a: any[]) => console.error("[get-orders]", ...a);
+type WooOrderLite = {
+  id: number;
+  status: string;
+  customer_id?: number;
+  billing?: { email?: string };
+};
 
-/** 產生 QueryTradeInfo 的 CheckValue（見 NDNF 4.1.6） */
-function makeCheckValue(amt: number | string, merchantOrderNo: string) {
-  const A = String(Math.round(Number(amt)));
-  // 依 A~Z 排序：Amt, MerchantID, MerchantOrderNo
-  const data1 = `Amt=${A}&MerchantID=${MERCHANT_ID}&MerchantOrderNo=${merchantOrderNo}`;
-  const s = `IV=${HASH_IV}&${data1}&Key=${HASH_KEY}`;
-  return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
-}
+const auth = { username: CONSUMER_KEY, password: CONSUMER_SECRET };
 
-/** 呼叫藍新 單筆交易查詢（以 MerchantOrderNo 查） */
-async function queryNewebpayByOrderNo(merchantOrderNo: string, amt: number | string) {
-  const form = qs.stringify({
-    MerchantID: MERCHANT_ID,
-    Version: "1.3",
-    RespondType: "JSON",
-    MerchantOrderNo: merchantOrderNo,
-    Amt: Math.round(Number(amt)),
-    CheckValue: makeCheckValue(amt, merchantOrderNo),
+async function fetchOrdersPage(params: Record<string, any>, page = 1) {
+  const { data, headers } = await axios.get<WooOrderLite[]>(WC_API_URL, {
+    auth,
+    params: { ...params, page },
   });
-
-  try {
-    const { data } = await axios.post(NEWEBPAY_QUERY_URL, form, {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      timeout: 10000,
-    });
-
-    // 回傳有時是 JSON，也可能包在 data.Result/字串，兩種都兼容
-    const payload = typeof data === "string" ? JSON.parse(data) : data;
-    if (payload?.Status !== "SUCCESS") {
-      warn("[newebpay] query FAIL", { merchantOrderNo, msg: payload?.Message });
-      return null;
-    }
-    const r = payload?.Result || {};
-    // 同一化欄位 + 只回離線取號類型
-    const type = String(r.PaymentType || "").toUpperCase();
-    if (!["VACC", "CVS", "WEBATM"].includes(type)) {
-      // 非離線取號（例：CREDIT），就不當作 offsite。
-      return null;
-    }
-    return {
-      PaymentType: type,
-      BankCode: r.BankCode || r.BankNo,
-      CodeNo: r.CodeNo || r.ATMAccNo || r.PaymentNo,
-      PaymentNo: r.PaymentNo,
-      StoreType: r.StoreType,
-      ExpireDate: r.ExpireDate || r.ExpireTime,
-      TradeNo: r.TradeNo,
-      Amt: r.Amt ?? amt,
-      PayTime: r.PayTime || "", // 有 PayTime 代表已繳
-    };
-  } catch (e: any) {
-    err("[newebpay] query ERROR", merchantOrderNo, e?.message);
-    return null;
-  }
+  const totalPages = parseInt(String(headers["x-wp-totalpages"] || "1"), 10) || 1;
+  return { data, totalPages };
 }
 
-/** 從 Woo 取某個 meta 值 */
-const mval = (order: any, key: string) =>
-  (order?.meta_data || []).find((m: any) => m?.key === key)?.value;
-
-/** 對單筆訂單補上 offsiteInfo（若需要） */
-async function attachOffsiteIfNeeded(order: any) {
-  const status = String(order?.status || "");
-  if (!["pending", "on_hold"].includes(status)) return order;
-
-  // 先看 API 端是不是已經組好（之後你若改別的來源，也不動前端）
-  if (order?.offsiteInfo) return order;
-
-  // 拿 Woo 的 newebpay_order_no 來查藍新
-  const merchantOrderNo =
-    mval(order, "newebpay_order_no") ||
-    mval(order, "MerchantOrderNo") ||
-    null;
-
-  if (!merchantOrderNo) {
-    log(`#${order.id} 無 newebpay_order_no，跳過 Query`);
-    return order;
+async function fetchAllOrders(params: Record<string, any>) {
+  // 先抓第 1 頁，讀 totalPages 再把其餘頁面抓回來
+  const first = await fetchOrdersPage(params, 1);
+  let all = first.data;
+  if (first.totalPages > 1) {
+    const pages = Array.from({ length: first.totalPages - 1 }, (_, i) => i + 2);
+    const rest = await Promise.all(
+      pages.map((p) =>
+        axios
+          .get<WooOrderLite[]>(WC_API_URL, { auth, params: { ...params, page: p } })
+          .then((r) => r.data)
+          .catch(() => [] as WooOrderLite[])
+      )
+    );
+    for (const arr of rest) all = all.concat(arr);
   }
-
-  const info = await queryNewebpayByOrderNo(merchantOrderNo, order.total);
-  log(
-    `[newebpay] #${order.id} 查詢結果`,
-    JSON.stringify({ merchantOrderNo, hasOffsite: !!info, paymentType: info?.PaymentType || "-" })
-  );
-
-  return {
-    ...order,
-    offsiteInfo: info || null,
-    paymentType: info?.PaymentType || order?.paymentType || "",
-  };
+  return all;
 }
 
-/** 取得會員訂單（userId 優先；無 userId 則用 email 過濾） */
-async function fetchWooOrders(userId?: string, email?: string) {
-  const params: any = {
-    per_page: 100,
-    status: "any",
-  };
-  if (userId) params.customer = userId;
-
-  const { data } = await axios.get(WC_API, {
-    auth: { username: WC_CK, password: WC_CS },
-    params,
-  });
-
-  let orders = Array.isArray(data) ? data : [];
-
-  if (!userId && email) {
-    orders = orders.filter((o: any) => (o?.billing?.email || "").toLowerCase() === email.toLowerCase());
-  }
-
-  // 簡易摘要 log
-  orders.forEach((o: any) => {
-    const type = mval(o, "newebpay_payment_type") || o.payment_method_title || "";
-    const hasOffsiteMeta = !!mval(o, "newebpay_offsite_info");
-    log(`#${o.id} | 狀態:${o.status} | customer_id:${o.customer_id} | offsiteMeta:${hasOffsiteMeta ? "Y" : "N"} | paymentType:${type}`);
-  });
-
-  return orders;
-}
-
-/** ====== handler ====== */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== "GET") return res.status(405).end("Method Not Allowed");
+
   const { userId, email } = req.query as { userId?: string; email?: string };
 
-  if (!userId && !email) {
-    return res.status(400).json({ error: "缺少 userId 或 email" });
+  if (!CONSUMER_KEY || !CONSUMER_SECRET) {
+    return res.status(500).json({ error: "缺少 WooCommerce API 金鑰環境變數" });
   }
 
   try {
-    log("入參", { userId, email });
+    // 基本查詢參數（帶 status:any 讓所有狀態都抓得到）
+    const baseParams: Record<string, any> = {
+      per_page: 30,
+      orderby: "date",
+      order: "desc",
+      status: "any",
+    };
 
-    const orders = await fetchWooOrders(userId, email);
+    let list: WooOrderLite[] = [];
 
-    // 只對待繳訂單查藍新，其他直接回傳
-    const out: any[] = [];
-    for (const o of orders) {
-      out.push(await attachOffsiteIfNeeded(o));
+    // 1) 優先用 userId 查（官方支援）
+    if (userId && /^\d+$/.test(String(userId))) {
+      list = await fetchAllOrders({ ...baseParams, customer: userId });
     }
 
-    log("回傳筆數：", out.length);
-    return res.status(200).json(out);
-  } catch (e: any) {
-    err("API 例外", e?.message);
-    return res.status(500).json({ error: "訂單查詢失敗", detail: e?.message || String(e) });
+    // 2) 若查不到 & 有 email → 用 email 後端過濾（Woo 沒原生 email 篩選）
+    if ((!list || list.length === 0) && email) {
+      const recent = await fetchAllOrders({ ...baseParams, per_page: 40 });
+      const em = String(email).toLowerCase();
+      list = (recent || []).filter(
+        (o) => String(o?.billing?.email || "").toLowerCase() === em
+      );
+    }
+
+    if (!Array.isArray(list)) list = [];
+
+    // 除錯列印
+    console.log("✅ WooCommerce 訂單清單（列表）:");
+    list.forEach((o) =>
+      console.log(`- #${o.id} | 狀態：${o.status} | customer_id: ${o.customer_id}`)
+    );
+
+    // 3) 逐筆抓「單筆詳情」，確保 meta_data / line_items 完整
+    const full = await Promise.all(
+      list.map(async (o) => {
+        try {
+          const { data } = await axios.get(`${WC_API_URL}/${o.id}`, { auth });
+          return data;
+        } catch (e) {
+          console.warn(`[get-orders] 單筆詳情抓取失敗 #${o.id}:`, (e as any)?.message);
+          return o; // 至少回列表項
+        }
+      })
+    );
+
+    // 4) 回傳前端實際需要的欄位
+    const slim = full.map((o: any) => ({
+      id: o.id,
+      status: o.status,
+      total: o.total,
+      date_created: o.date_created,
+      payment_method_title: o.payment_method_title,
+      billing: o.billing,
+      line_items: o.line_items,
+      meta_data: o.meta_data, // 這裡會帶到 newebpay_offsite_info / esim_qrcodes 等
+    }));
+
+    return res.status(200).json(slim);
+  } catch (error: any) {
+    console.error("❌ WooCommerce 訂單查詢錯誤:", error?.response?.data || error.message);
+    return res
+      .status(500)
+      .json({ error: "訂單查詢失敗", detail: error?.response?.data || error.message });
   }
 }
