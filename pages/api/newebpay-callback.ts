@@ -1,3 +1,4 @@
+// /pages/api/newebpay-callback.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import crypto from "crypto";
 import axios from "axios";
@@ -14,10 +15,10 @@ const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
 const ESIM_PROXY_URL = "https://www.wmesim.com/api/esim/qrcode";
 
-const INVOICE_API_URL   = "https://inv.ezpay.com.tw/Api/invoice_issue";
+const INVOICE_API_URL     = "https://inv.ezpay.com.tw/Api/invoice_issue";
 const INVOICE_MERCHANT_ID = "345049107";
-const INVOICE_HASH_KEY  = "FnDByoo3m9U4nVi29UciIbAHVQRQogHG";
-const INVOICE_HASH_IV   = "PtgsjF33nlm8q2kC";
+const INVOICE_HASH_KEY    = "FnDByoo3m9U4nVi29UciIbAHVQRQogHG";
+const INVOICE_HASH_IV     = "PtgsjF33nlm8q2kC";
 
 /** 你自己的 planId 對應（可擴充） */
 const PLAN_ID_MAP: Record<string, string> = {
@@ -63,7 +64,8 @@ async function sendEsimEmail(to: string, orderNumber: string, imagesHtml: string
   });
   await transporter.sendMail({
     from: `eSIM 團隊 <wandmesim@gmail.com>`,
-    to, subject: `訂單 ${orderNumber} 的 eSIM QRCode`,
+    to,
+    subject: `訂單 ${orderNumber} 的 eSIM QRCode`,
     html: `<p>您好，感謝您的購買！以下是您的 eSIM QRCode：</p><p>${imagesHtml}</p>`,
   });
 }
@@ -89,14 +91,14 @@ function parseDecrypted(text: string): any {
 
 function buildOffsiteInfo(result: any) {
   return {
-    PaymentType: result?.PaymentType,                 // VACC / CVS / WEBATM ...
-    BankCode: result?.BankCode || result?.BankNo,
-    CodeNo: result?.CodeNo || result?.ATMAccNo || result?.PaymentNo,
-    PaymentNo: result?.PaymentNo,                     // CVS 代碼
-    StoreType: result?.StoreType,                     // CVS 別
-    ExpireDate: result?.ExpireDate || result?.ExpireTime,
-    TradeNo: result?.TradeNo,
-    Amt: result?.Amt,
+    PaymentType: String(result?.PaymentType || "").toUpperCase(), // VACC / CVS / WEBATM ...
+    BankCode:    result?.BankCode || result?.BankNo || "",
+    CodeNo:      result?.CodeNo   || result?.ATMAccNo || result?.PaymentNo || "",
+    PaymentNo:   result?.PaymentNo || "",
+    StoreType:   result?.StoreType || "",
+    ExpireDate:  result?.ExpireDate || result?.ExpireTime || "",
+    TradeNo:     result?.TradeNo || "",
+    Amt:         result?.Amt,
   };
 }
 
@@ -104,6 +106,8 @@ function isPaid(result: any, status: string | undefined) {
   const payType = String(result?.PaymentType || "").toUpperCase();
   return !!result?.PayTime || (payType === "CREDIT" && status === "SUCCESS");
 }
+
+const ntd = (x: any) => `NT$ ${Math.round(Number(x || 0)).toLocaleString("zh-TW")}`;
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
@@ -137,86 +141,83 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
       params: { per_page: 20, orderby: "date", order: "desc" },
     });
+
     const order = (orders || []).find((o: any) =>
       o?.meta_data?.some((m: any) => m?.key === "newebpay_order_no" && m?.value === orderNumber)
     );
     if (!order) return res.redirect(302, `/thank-you?status=notfound&orderNo=${orderNumber}`);
 
     const orderId = order.id;
+
+    // 讀取一次完整訂單
     const { data: fullOrder } = await axios.get(`${WOOCOMMERCE_API_URL}/${orderId}`, {
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
     });
 
-  // 2) 「待繳」類型（VACC/CVS/WEBATM）→ 寫 offsite 資訊 + 訂單備註，狀態 on-hold
-const payType = String(result?.PaymentType || "").toUpperCase();
-const isOffsitePending =
-  (payType === "VACC" || payType === "CVS" || payType === "WEBATM") && !result?.PayTime;
+    // 2) 「待繳」類型（VACC/CVS/WEBATM）→ 寫 offsite 資訊 + 訂單備註，狀態 on-hold
+    const payType = String(result?.PaymentType || "").toUpperCase();
+    const isOffsitePending =
+      (payType === "VACC" || payType === "CVS" || payType === "WEBATM") && !result?.PayTime;
 
-if (isOffsitePending) {
-  const offsiteInfo = buildOffsiteInfo(result);
+    console.log("[newebpay-callback] isOffsitePending =", isOffsitePending, "PaymentType =", payType);
 
-  // 取得最新訂單，檢查是否已經留過備註（冪等）
-  const { data: current } = await axios.get(`${WOOCOMMERCE_API_URL}/${orderId}`, {
-    auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
-  });
-  const alreadyNoted = (current?.meta_data || []).some(
-    (m: any) => m?.key === "newebpay_offsite_note_v1"
-  );
+    if (isOffsitePending) {
+      const offsiteInfo = buildOffsiteInfo(result);
 
-  // 先更新狀態 + meta（照舊）
-  await axios.put(
-    `${WOOCOMMERCE_API_URL}/${orderId}`,
-    {
-      status: "on-hold",
-      meta_data: [
-        { key: "newebpay_offsite_info", value: JSON.stringify(offsiteInfo) },
-        { key: "newebpay_payment_type", value: payType },
-        { key: "newebpay_expire_date",  value: String(offsiteInfo?.ExpireDate || "") },
-        { key: "newebpay_code_no",      value: String(offsiteInfo?.CodeNo || offsiteInfo?.PaymentNo || "") },
-        { key: "newebpay_bank_code",    value: String(offsiteInfo?.BankCode || "") },
-      ],
-    },
-    { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-  );
+      // 取最新訂單看看是否已寫過（冪等）
+      const { data: current } = await axios.get(`${WOOCOMMERCE_API_URL}/${orderId}`, {
+        auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
+      });
+      const alreadyNoted = (current?.meta_data || []).some(
+        (m: any) => m?.key === "newebpay_offsite_note_v1"
+      );
 
-  // 組備註內容（ATM / 超商分別顯示）
-  const ntd = (x: any) => `NT$ ${Math.round(Number(x || 0)).toLocaleString("zh-TW")}`;
-  const lines: string[] = [
-    `🔔 藍新金流 取號成功（${payType}）`,
-    offsiteInfo.BankCode ? `銀行代碼：${offsiteInfo.BankCode}` : "",
-    (offsiteInfo.CodeNo || offsiteInfo.PaymentNo)
-      ? `轉帳帳號 / 繳費代碼：${offsiteInfo.CodeNo || offsiteInfo.PaymentNo}`
-      : "",
-    offsiteInfo.StoreType ? `超商別：${offsiteInfo.StoreType}` : "",
-    `應繳金額：${ntd(offsiteInfo.Amt ?? current?.total)}`,
-    offsiteInfo.ExpireDate ? `繳費期限：${offsiteInfo.ExpireDate}` : "",
-    offsiteInfo.TradeNo ? `交易序號：${offsiteInfo.TradeNo}` : "",
-    `商店訂單號：${orderNumber}`,
-    "（此備註由系統自動加入）",
-  ].filter(Boolean);
+      // 先更新狀態 + meta
+      await axios.put(
+        `${WOOCOMMERCE_API_URL}/${orderId}`,
+        {
+          status: "on-hold",
+          meta_data: [
+            { key: "newebpay_offsite_info", value: JSON.stringify(offsiteInfo) },
+            { key: "newebpay_payment_type", value: payType },
+            { key: "newebpay_expire_date",  value: String(offsiteInfo?.ExpireDate || "") },
+            { key: "newebpay_code_no",      value: String(offsiteInfo?.CodeNo || offsiteInfo?.PaymentNo || "") },
+            { key: "newebpay_bank_code",    value: String(offsiteInfo?.BankCode || "") },
+          ],
+        },
+        { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+      );
 
-  // 冪等：若尚未留過備註才新增，並打上 meta 旗標
-  if (!alreadyNoted) {
-    await axios.post(
-      `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
-      {
-        note: lines.join("\n"),
-        // 若不想寄信給客戶就用 false；想同步寄給客戶就改 true
-        customer_note: false,
-      },
-      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-    );
+      // 組備註
+      const lines: string[] = [
+        `🔔 藍新金流 取號成功（${payType}）`,
+        offsiteInfo.BankCode ? `銀行代碼：${offsiteInfo.BankCode}` : "",
+        (offsiteInfo.CodeNo || offsiteInfo.PaymentNo)
+          ? `轉帳帳號 / 繳費代碼：${offsiteInfo.CodeNo || offsiteInfo.PaymentNo}`
+          : "",
+        offsiteInfo.StoreType ? `超商別：${offsiteInfo.StoreType}` : "",
+        `應繳金額：${ntd(offsiteInfo.Amt ?? current?.total)}`,
+        offsiteInfo.ExpireDate ? `繳費期限：${offsiteInfo.ExpireDate}` : "",
+        offsiteInfo.TradeNo ? `交易序號：${offsiteInfo.TradeNo}` : "",
+        `商店訂單號：${orderNumber}`,
+        "（此備註由系統自動加入）",
+      ].filter(Boolean);
 
-    await axios.put(
-      `${WOOCOMMERCE_API_URL}/${orderId}`,
-      { meta_data: [{ key: "newebpay_offsite_note_v1", value: "1" }] },
-      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-    );
-  }
+      if (!alreadyNoted) {
+        await axios.post(
+          `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
+          { note: lines.join("\n"), customer_note: false },
+          { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+        );
+        await axios.put(
+          `${WOOCOMMERCE_API_URL}/${orderId}`,
+          { meta_data: [{ key: "newebpay_offsite_note_v1", value: "1" }] },
+          { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+        );
+      }
 
-  return res.redirect(302, `/thank-you?status=pending&orderNo=${orderNumber}`);
-}
-
+      return res.redirect(302, `/thank-you?status=pending&orderNo=${orderNumber}`);
+    }
 
     // 3) 已付款完成（信用卡或 ATM 真入帳）→ 設 processing、開 eSIM、開立發票（冪等）
     if (isPaid(result, status)) {
@@ -228,8 +229,8 @@ if (isOffsitePending) {
           {
             status: "processing",
             meta_data: [
-              { key: "newebpay_trade_no",   value: String(result?.TradeNo || "") },
-              { key: "newebpay_pay_time",   value: String(result?.PayTime || "") },
+              { key: "newebpay_trade_no",     value: String(result?.TradeNo || "") },
+              { key: "newebpay_pay_time",     value: String(result?.PayTime || "") },
               { key: "newebpay_payment_type", value: payType },
             ],
           },
