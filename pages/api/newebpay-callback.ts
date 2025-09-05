@@ -147,14 +147,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
     });
 
-    // 2) 「待繳」類型（VACC/CVS/WEBATM）→ 寫 offsite 資訊、設 on-hold，並在訂單備註留下匯款資訊
+  // 2) 「待繳」類型（VACC/CVS/WEBATM）→ 寫 offsite 資訊 + 訂單備註，狀態 on-hold
 const payType = String(result?.PaymentType || "").toUpperCase();
-const isOffsitePending = (payType === "VACC" || payType === "CVS" || payType === "WEBATM") && !result?.PayTime;
+const isOffsitePending =
+  (payType === "VACC" || payType === "CVS" || payType === "WEBATM") && !result?.PayTime;
 
 if (isOffsitePending) {
   const offsiteInfo = buildOffsiteInfo(result);
 
-  // 先更新訂單狀態與 meta
+  // 取得最新訂單，檢查是否已經留過備註（冪等）
+  const { data: current } = await axios.get(`${WOOCOMMERCE_API_URL}/${orderId}`, {
+    auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
+  });
+  const alreadyNoted = (current?.meta_data || []).some(
+    (m: any) => m?.key === "newebpay_offsite_note_v1"
+  );
+
+  // 先更新狀態 + meta（照舊）
   await axios.put(
     `${WOOCOMMERCE_API_URL}/${orderId}`,
     {
@@ -170,31 +179,39 @@ if (isOffsitePending) {
     { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
   );
 
-  // 再把匯款/代碼資訊寫到訂單備註（customer_note: true 會寄信通知客戶；不想寄信就設 false）
-  const lines = [
-    "🔔 取號成功（離線繳費）",
-    `付款方式：${payType}`,
-    offsiteInfo.BankCode ? `銀行代碼：${offsiteInfo.BankCode}` : null,
-    // ATM/WEBATM 多用 CodeNo（虛擬帳號），CVS 則是 PaymentNo
-    offsiteInfo.CodeNo || offsiteInfo.PaymentNo
-      ? `虛擬帳號/繳費代碼：${offsiteInfo.CodeNo || offsiteInfo.PaymentNo}`
-      : null,
-    offsiteInfo.StoreType ? `超商別：${offsiteInfo.StoreType}` : null,
-    offsiteInfo.Amt ? `應繳金額：NT$ ${offsiteInfo.Amt}` : null,
-    offsiteInfo.ExpireDate ? `繳費期限：${offsiteInfo.ExpireDate}` : null,
-    offsiteInfo.TradeNo ? `藍新交易序號：${offsiteInfo.TradeNo}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  // 組備註內容（ATM / 超商分別顯示）
+  const ntd = (x: any) => `NT$ ${Math.round(Number(x || 0)).toLocaleString("zh-TW")}`;
+  const lines: string[] = [
+    `🔔 藍新金流 取號成功（${payType}）`,
+    offsiteInfo.BankCode ? `銀行代碼：${offsiteInfo.BankCode}` : "",
+    (offsiteInfo.CodeNo || offsiteInfo.PaymentNo)
+      ? `轉帳帳號 / 繳費代碼：${offsiteInfo.CodeNo || offsiteInfo.PaymentNo}`
+      : "",
+    offsiteInfo.StoreType ? `超商別：${offsiteInfo.StoreType}` : "",
+    `應繳金額：${ntd(offsiteInfo.Amt ?? current?.total)}`,
+    offsiteInfo.ExpireDate ? `繳費期限：${offsiteInfo.ExpireDate}` : "",
+    offsiteInfo.TradeNo ? `交易序號：${offsiteInfo.TradeNo}` : "",
+    `商店訂單號：${orderNumber}`,
+    "（此備註由系統自動加入）",
+  ].filter(Boolean);
 
-  try {
+  // 冪等：若尚未留過備註才新增，並打上 meta 旗標
+  if (!alreadyNoted) {
     await axios.post(
       `${WOOCOMMERCE_API_URL}/${orderId}/notes`,
-      { note: lines, customer_note: true },
+      {
+        note: lines.join("\n"),
+        // 若不想寄信給客戶就用 false；想同步寄給客戶就改 true
+        customer_note: false,
+      },
       { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
     );
-  } catch (e) {
-    console.error("建立訂單備註失敗：", (e as any)?.response?.data || (e as any)?.message);
+
+    await axios.put(
+      `${WOOCOMMERCE_API_URL}/${orderId}`,
+      { meta_data: [{ key: "newebpay_offsite_note_v1", value: "1" }] },
+      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+    );
   }
 
   return res.redirect(302, `/thank-you?status=pending&orderNo=${orderNumber}`);
