@@ -24,7 +24,7 @@ export default function BlogPage({ posts }) {
   return (
     <Layout>
       <div className="max-w-[1920px] pb-[100px] pt-[200px] w-[90%] xl:w-[85%] mx-auto px-4">
-        <h1 className="text-3xl font-bold mb-8 text-center">部落格文章</h1>
+        <h1 className="text-3xl font-bold mb-8 text-center">部落格文章123</h1>
 
         <div className="grid gap-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
           {posts.map((post, index) => {
