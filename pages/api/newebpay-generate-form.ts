@@ -140,11 +140,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     LoginType: "0",
 
     // ✅ 「已入帳」類事件（S2S + 導回）→ callback
-    NotifyURL:  "https://www.wmesim.com/api/newebpay-callback",
-    ReturnURL:  "https://www.wmesim.com/api/newebpay-callback",
+    NotifyURL:  "https://www.wmesim.com/api/newebpay-callback/",
+    ReturnURL:  "https://www.wmesim.com/api/newebpay-callback/",
 
     // ✅ 「取號成功」事件（ATM/CVS/BARCODE）→ notify
-    PaymentInfoURL: "https://www.wmesim.com/api/newebpay-notify",
+    PaymentInfoURL: "https://www.wmesim.com/api/newebpay-notify/",
 
     // ✅ 使用者導回你的頁面
     ClientBackURL:  thankYouUrl,
