@@ -72,17 +72,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   /* === 付款方式決策 ===
      1) 店家白名單（環境變數設定你後台真正有開的方式）
         例：NEWEBPAY_ALLOWED_METHODS="CREDIT,VACC,WEBATM"
-        （不含 CVS，就不會送 CVS）
      2) 前端本次需求（orderInfo.method / orderInfo.methods）
      最終 = 白名單 ∩ 本次需求；若本次沒指定，採用白名單。若交集為空，退回 ["CREDIT"]。
   */
   const envAllowedRaw = process.env.NEWEBPAY_ALLOWED_METHODS || "CREDIT,VACC,WEBATM";
   const envAllowed = normalizeMethods(envAllowedRaw);
   const requested = normalizeMethods(orderInfo?.methods ?? orderInfo?.method);
-  const chosen = (requested.length
-    ? envAllowed.filter((m) => requested.includes(m))
-    : envAllowed
-  );
+  const chosen = requested.length ? envAllowed.filter((m) => requested.includes(m)) : envAllowed;
   const methods = chosen.length ? chosen : ["CREDIT"];
   const flags = buildFlags(methods);
   const paymentMethodValue = methods.join(",");
@@ -103,7 +99,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const lineItem: any = {
           product_id: item.id,
           quantity: item.quantity,
-          meta_data: [],
+          meta_data: [] as Array<{ key: string; value: string }>,
           ...(item.variation_id && { variation_id: item.variation_id }),
         };
         if (item.planId) lineItem.meta_data.push({ key: "esim_plan_id", value: item.planId });
@@ -130,6 +126,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   /* === Step2: 準備藍新 MPG 參數（動態） === */
   const needExpire = methods.some((m) => ["VACC", "CVS", "BARCODE"].includes(m));
+
+  const thankYouUrl = `https://www.wmesim.com/thank-you?orderNo=${orderNo}`;
+
   const tradeInfoObj: Record<string, string> = {
     MerchantID: MERCHANT_ID,
     RespondType: "JSON",
@@ -141,24 +140,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     Email: orderInfo?.email || "test@example.com",
     LoginType: "0",
 
-  ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
-NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
+    // ✅ 伺服器回呼（已付款 / 入帳類）
+    ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
+    NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
 
+    // ✅ 取號結果通知（ATM / CVS / BARCODE 取號當下）
+    PaymentInfoURL: "https://www.wmesim.com/api/newebpay-notify",
+
+    // ✅ 使用者瀏覽器導回
+    ClientBackURL: thankYouUrl,
+    OrderResultURL: thankYouUrl,
 
     // ✅ 動態付款方式
     PaymentMethod: paymentMethodValue,
     CREDIT: flags.CREDIT,
     VACC: flags.VACC,
     WEBATM: flags.WEBATM,
-    CVS: flags.CVS,        // 若白名單不含，會是 "0"
+    CVS: flags.CVS,
     BARCODE: flags.BARCODE,
     LINEPAY: flags.LINEPAY,
 
     ...(needExpire ? { ExpireDate: String(orderInfo?.expireMinutes ?? 1440) } : {}),
   };
-
-  //（上線後可移除）檢查參數，避免誤送 CVS
-  // console.log("[MPG params]", tradeInfoObj);
 
   const tradeInfoStr = new URLSearchParams(tradeInfoObj).toString();
   const encrypted = aesEncrypt(tradeInfoStr, HASH_KEY, HASH_IV);
