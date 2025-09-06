@@ -126,7 +126,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   /* === Step2: 準備藍新 MPG 參數（動態） === */
   const needExpire = methods.some((m) => ["VACC", "CVS", "BARCODE"].includes(m));
-
   const thankYouUrl = `https://www.wmesim.com/thank-you?orderNo=${orderNo}`;
 
   const tradeInfoObj: Record<string, string> = {
@@ -140,23 +139,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     Email: orderInfo?.email || "test@example.com",
     LoginType: "0",
 
-    // ✅ 伺服器回呼（已付款 / 入帳類）
-    ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
-    NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
+    // ✅ 「已入帳」類事件（S2S + 導回）→ callback
+    NotifyURL:  "https://www.wmesim.com/api/newebpay-callback",
+    ReturnURL:  "https://www.wmesim.com/api/newebpay-callback",
 
-    // ✅ 取號結果通知（ATM / CVS / BARCODE 取號當下）
+    // ✅ 「取號成功」事件（ATM/CVS/BARCODE）→ notify
     PaymentInfoURL: "https://www.wmesim.com/api/newebpay-notify",
 
-    // ✅ 使用者瀏覽器導回
-    ClientBackURL: thankYouUrl,
+    // ✅ 使用者導回你的頁面
+    ClientBackURL:  thankYouUrl,
     OrderResultURL: thankYouUrl,
 
     // ✅ 動態付款方式
     PaymentMethod: paymentMethodValue,
-    CREDIT: flags.CREDIT,
-    VACC: flags.VACC,
-    WEBATM: flags.WEBATM,
-    CVS: flags.CVS,
+    CREDIT:  flags.CREDIT,
+    VACC:    flags.VACC,
+    WEBATM:  flags.WEBATM,
+    CVS:     flags.CVS,
     BARCODE: flags.BARCODE,
     LINEPAY: flags.LINEPAY,
 
