@@ -141,9 +141,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     Email: orderInfo?.email || "test@example.com",
     LoginType: "0",
 
-    ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
-    NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
-    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`,
+  ReturnURL: "https://www.wmesim.com/api/newebpay-callback",
+NotifyURL: "https://www.wmesim.com/api/newebpay-notify",
+
 
     // ✅ 動態付款方式
     PaymentMethod: paymentMethodValue,
