@@ -398,6 +398,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const wooOrderId = await findWooOrderIdByNewebpayNo(merchantOrderNo);
     if (!wooOrderId) {
+      try {
+  await axios.post(
+    `${WC_API_BASE}/orders/${wooOrderId}/notes`,
+    {
+      note: [
+        "🧪 [DEBUG] 收到 Newebpay Notify",
+        `Status=${Status || ""}`,
+        `PaymentType=${String(result?.PaymentType || "")}`,
+        `MerchantOrderNo=${merchantOrderNo}`,
+        `HasPayMoment=${Boolean(
+          result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime
+        )}`,
+        `PayTime=${result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime || ""}`,
+      ].join("\n"),
+      customer_note: false, // 不寄給客人，只寫後台備註
+    },
+    { auth: { username: WC_CK, password: WC_CS } }
+  );
+} catch (e: any) {
+  console.warn("[notify] debug note failed:", e?.message || e);
+}
+
       res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
       return res.status(200).end("OK");
     }
