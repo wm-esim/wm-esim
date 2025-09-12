@@ -1,15 +1,6 @@
-// next.config.js
 const path = require("path");
 
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  reactStrictMode: true,
-
-  // 關閉 Next 自動做尾斜線 308 轉址（避免 POST body 在 30x 中遺失）
-  skipTrailingSlashRedirect: true,
-  // 不再強制全站尾斜線
-  // trailingSlash: false, // 不寫等於預設 false；若你有設 true，請改成 false 或移除
-
+module.exports = {
   images: {
     remotePatterns: [
       {
@@ -29,20 +20,29 @@ const nextConfig = {
       },
     ],
   },
-
+  trailingSlash: true,
+  webpackDevMiddleware: (config) => {
+    config.watchOptions = {
+      poll: 1000,
+      aggregateTimeout: 300,
+    };
+    return config;
+  },
   sassOptions: {
     includePaths: [path.join(__dirname, "styles")],
   },
 
-  // 讓「有尾斜線」也能直達「檔案版」API，不經過 30x
   async rewrites() {
     return [
-      { source: "/api/newebpay-notify/",   destination: "/api/newebpay-notify" },
-      { source: "/api/newebpay-callback/", destination: "/api/newebpay-callback" },
+      // ✅ 讓 /api/newebpay-notify（無斜線）直接 rewrite 到 /api/newebpay-notify/（有斜線）
+      {
+        source: "/api/newebpay-notify",
+        destination: "/api/newebpay-notify/",
+      },
     ];
   },
 
-  // ⬇️ 保留你的 WebGL Shader 設定
+  // ⬇️ 加入 WebGL Shader 支援設定
   webpack(config) {
     config.module.rules.push({
       test: /\.(glsl|vs|fs)$/,
@@ -51,5 +51,3 @@ const nextConfig = {
     return config;
   },
 };
-
-module.exports = nextConfig;

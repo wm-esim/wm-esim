@@ -33,64 +33,6 @@ const statusLabel = (status) =>
     failed: "付款失敗",
   }[status] || status);
 
-/** 從 meta_data 取出 offsite 資訊（ATM/超商/其它代碼繳費）
- * ① 先讀聚合 JSON: newebpay_offsite_info
- * ② 若沒有，再從個別欄位（notify 寫入的欄位）拼出來
- */
-function readOffsiteInfo(meta) {
-  if (!Array.isArray(meta)) return null;
-
-  const findVal = (k) => meta.find((m) => m?.key === k)?.value;
-
-  // ① 聚合 JSON
-  const raw = findVal("newebpay_offsite_info");
-  if (raw) {
-    try {
-      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-      return parsed || null;
-    } catch (e) {
-      warn("解析 newebpay_offsite_info JSON 失敗，raw=", raw, e);
-    }
-  }
-
-  // ② 個別欄位備援（若 notify 只寫了單獨欄位）
-  const paymentType = findVal("newebpay_payment_type"); // e.g. VACC/CVS/WEBATM
-  const bankCode = findVal("newebpay_bank_code");
-  const codeNo = findVal("newebpay_code_no"); // ATM 虛擬帳號 / CVS 代碼
-  const expireDate = findVal("newebpay_expire_date");
-  const paymentNo = codeNo; // 顯示上相同用途
-  const storeType = findVal("newebpay_store_type");
-  const amt = findVal("newebpay_amt"); // 若沒寫入，就讓前端不顯示金額
-
-  // 若完全沒有關鍵欄位，視為沒有 offsite
-  if (!paymentType && !bankCode && !codeNo && !expireDate) {
-    return null;
-  }
-
-  const fallback = {
-    PaymentType: (paymentType || "").toUpperCase(),
-    BankCode: bankCode || "",
-    CodeNo: codeNo || "",
-    PaymentNo: paymentNo || "",
-    StoreType: storeType || "",
-    ExpireDate: expireDate || "",
-    ...(amt ? { Amt: String(amt) } : {}),
-  };
-
-  log("使用備援 offsite（由個別欄位拼回）=>", fallback);
-  return fallback;
-}
-
-/** 付款方式（若 meta 有 newebpay_payment_type 優先） */
-function readPaymentType(meta, fallback) {
-  if (!Array.isArray(meta)) return fallback || "";
-  return (
-    meta.find((m) => m?.key === "newebpay_payment_type")?.value ||
-    fallback ||
-    ""
-  );
-}
-
 /** 支援多張 QRCode（esim_qrcodes）或單張（esim_qrcode + 數量） */
 function readQRCodes(meta, namePrefix = "eSIM") {
   const results = [];
@@ -133,44 +75,36 @@ function readQRCodes(meta, namePrefix = "eSIM") {
   return results;
 }
 
-/** 把字串日期轉成在地時間（有些回傳是 "YYYY-MM-DD hh:mm:ss"） */
-const fmtDT = (s) =>
-  s ? new Date(s.replace(/-/g, "/")).toLocaleString("zh-TW") : "—";
-
-/** ✅ 統一從 order 取 offsite（優先 order.offsiteInfo，退回解析 meta） */
-const getOffsiteFromOrder = (order) =>
-  order?.offsiteInfo || readOffsiteInfo(order?.meta_data || []);
+/* ===== Skeleton ===== */
+const OrderSkeletonGrid = ({ count = 8 }) => (
+  <ul className="grid grid-cols-1 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3">
+    {Array.from({ length: count }).map((_, i) => (
+      <li key={i} className="border border-gray-200 rounded bg-white p-4">
+        <div className="space-y-3 animate-pulse">
+          <div className="h-4 bg-gray-200 rounded w-1/3" />
+          <div className="h-3 bg-gray-200 rounded w-2/3" />
+          <div className="h-3 bg-gray-200 rounded w-1/2" />
+          <div className="h-3 bg-gray-200 rounded w-3/4" />
+          <div className="h-24 bg-gray-100 rounded" />
+        </div>
+      </li>
+    ))}
+  </ul>
+);
 
 /* ========== 主頁面 ========== */
 const AccountPage = () => {
   const [userInfo, setUserInfo] = useState(null);
   const [orders, setOrders] = useState([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersLoaded, setOrdersLoaded] = useState(false);
   const [favorites, setFavorites] = useState([]);
-  const [activeTab, setActiveTab] = useState("info"); // info | qrcode | payment
+  const [activeTab, setActiveTab] = useState("info"); // info | qrcode
   const [editingEmail, setEditingEmail] = useState("");
   const [editingPhone, setEditingPhone] = useState("");
   const [editingName, setEditingName] = useState("");
   const [editMode, setEditMode] = useState(false);
   const router = useRouter();
-
-  const copyText = async (text) => {
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      alert("已複製到剪貼簿");
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand("copy");
-        alert("已複製到剪貼簿");
-      } finally {
-        document.body.removeChild(ta);
-      }
-    }
-  };
 
   /** 依 userId/email 抓訂單（同時帶兩者，讓後端可 fallback） */
   const fetchOrders = useCallback(async (u) => {
@@ -188,21 +122,35 @@ const AccountPage = () => {
     }
     const data = await res.json();
     const list = Array.isArray(data) ? data : [];
-    // 列出每筆訂單摘要
     log(
       "get-orders 回傳筆數：",
       list.length,
       list.map((o) => ({
         id: o.id,
         status: o.status,
-        hasOffsite: !!getOffsiteFromOrder(o),
-        paymentType:
-          o.paymentType ||
-          readPaymentType(o.meta_data || [], o.payment_method_title),
+        total: o.total,
       }))
     );
     return list;
   }, []);
+
+  /** 包裝訂單載入流程（含 loading 標記） */
+  const loadOrders = useCallback(
+    async (u) => {
+      if (!u) return;
+      setOrdersLoading(true);
+      try {
+        const list = await fetchOrders(u);
+        setOrders(list);
+      } catch (e) {
+        error("抓訂單失敗：", e?.message);
+      } finally {
+        setOrdersLoading(false);
+        setOrdersLoaded(true);
+      }
+    },
+    [fetchOrders]
+  );
 
   // 讀會員與訂單（具備 token 403 的 fallback）
   useEffect(() => {
@@ -253,20 +201,8 @@ const AccountPage = () => {
       setEditingPhone(user.meta?.billing_phone || "");
       setEditingName(user.name || "");
 
-      try {
-        const list = await fetchOrders(user);
-        setOrders(list);
-
-        const hasPending = list.some(
-          (o) =>
-            ["pending", "on_hold"].includes(o.status) &&
-            !!getOffsiteFromOrder(o)
-        );
-        log("是否有待繳訂單(hasPending) =", hasPending);
-        if (hasPending) setActiveTab("payment");
-      } catch (e) {
-        error("抓訂單失敗：", e?.message);
-      }
+      // 初次載入就把訂單抓好（避免切到分頁才抓）
+      await loadOrders(user);
     };
 
     load().catch((e) => {
@@ -276,25 +212,14 @@ const AccountPage = () => {
 
     const fav = JSON.parse(localStorage.getItem("favorites") || "[]");
     setFavorites(fav);
-  }, [router, fetchOrders]);
+  }, [router, loadOrders]);
 
-  // 在繳費分頁時每 15 秒刷新一次訂單狀態
+  // 切到「QRCode 訂單」時，如果尚未載入完成就觸發載入（雙保險）
   useEffect(() => {
-    if (activeTab !== "payment" || !userInfo) return;
-    log("進入繳費分頁，啟動 15s 輪詢刷新訂單狀態");
-    const timer = setInterval(async () => {
-      try {
-        const list = await fetchOrders(userInfo);
-        setOrders(list);
-      } catch (e) {
-        error("輪詢抓訂單失敗：", e?.message);
-      }
-    }, 15000);
-    return () => {
-      log("離開繳費分頁，清除輪詢計時器");
-      clearInterval(timer);
-    };
-  }, [activeTab, userInfo, fetchOrders]);
+    if (activeTab === "qrcode" && !ordersLoaded && userInfo) {
+      loadOrders(userInfo);
+    }
+  }, [activeTab, ordersLoaded, userInfo, loadOrders]);
 
   const handleProfileUpdate = async () => {
     const token = localStorage.getItem("token");
@@ -338,104 +263,6 @@ const AccountPage = () => {
 
   if (!userInfo)
     return <p className="mt-40 text-center">正在載入會員資料...</p>;
-
-  // ==== 繳費資訊卡片 ====
-  const OffsiteCard = ({ offsite }) => {
-    if (!offsite) return null;
-
-    const type = String(offsite?.PaymentType || "").toUpperCase();
-    const isATM = type === "VACC" || type === "WEBATM";
-    const isCVS = type === "CVS";
-
-    return (
-      <div className="mt-2 p-4 rounded-[8px] border border-yellow-200 bg-yellow-50">
-        <p className="font-semibold text-yellow-900 mb-2">
-          匯款 / 代碼繳費資訊
-        </p>
-
-        {isATM && (
-          <div className="space-y-1 text-sm">
-            <p>
-              銀行代碼：
-              <span className="font-mono">{offsite.BankCode || "—"}</span>
-              <button
-                className="ml-2 underline text-blue-700"
-                onClick={() => copyText(offsite.BankCode)}
-              >
-                複製
-              </button>
-            </p>
-            <p>
-              虛擬帳號：
-              <span className="font-mono break-all">
-                {offsite.CodeNo || "—"}
-              </span>
-              <button
-                className="ml-2 underline text-blue-700"
-                onClick={() => copyText(offsite.CodeNo)}
-              >
-                複製
-              </button>
-            </p>
-            {!!offsite.Amt && (
-              <p>應繳金額：NT${formatNTDNoDecimals(offsite.Amt)}</p>
-            )}
-            <p>繳費期限：{fmtDT(offsite.ExpireDate)}</p>
-          </div>
-        )}
-
-        {isCVS && (
-          <div className="space-y-1 text-sm">
-            <p>超商別：{offsite.StoreType || "—"}</p>
-            <p>
-              繳費代碼：
-              <span className="font-mono break-all">
-                {offsite.PaymentNo || offsite.CodeNo || "—"}
-              </span>
-              <button
-                className="ml-2 underline text-blue-700"
-                onClick={() => copyText(offsite.PaymentNo || offsite.CodeNo)}
-              >
-                複製
-              </button>
-            </p>
-            {!!offsite.Amt && (
-              <p>應繳金額：NT${formatNTDNoDecimals(offsite.Amt)}</p>
-            )}
-            <p>繳費期限：{fmtDT(offsite.ExpireDate)}</p>
-          </div>
-        )}
-
-        {!isATM && !isCVS && (
-          <div className="space-y-1 text-sm">
-            <p>付款方式：{offsite?.PaymentType || "—"}</p>
-            {!!offsite?.CodeNo && (
-              <p>
-                代碼：
-                <span className="font-mono break-all">{offsite.CodeNo}</span>
-                <button
-                  className="ml-2 underline text-blue-700"
-                  onClick={() => copyText(offsite.CodeNo)}
-                >
-                  複製
-                </button>
-              </p>
-            )}
-            {!!offsite?.Amt && (
-              <p>應繳金額：NT${formatNTDNoDecimals(offsite.Amt)}</p>
-            )}
-            {!!offsite?.ExpireDate && (
-              <p>繳費期限：{fmtDT(offsite.ExpireDate)}</p>
-            )}
-          </div>
-        )}
-
-        <p className="text-xs text-gray-600 mt-2">
-          ※ 若逾期未繳，訂單將自動失效；如需協助請聯繫客服。
-        </p>
-      </div>
-    );
-  };
 
   return (
     <Layout>
@@ -487,19 +314,6 @@ const AccountPage = () => {
                       }`}
                     >
                       QR Code 訂單
-                    </button>
-                  </li>
-                  {/* ✅ 新增：繳費資訊分頁按鈕 */}
-                  <li>
-                    <button
-                      onClick={() => setActiveTab("payment")}
-                      className={`block w-full text左 px-4 py-2 rounded-[5px] ${
-                        activeTab === "payment"
-                          ? "bg-[#1757FF] text-white font-bold"
-                          : "bg-white text-gray-700"
-                      }`}
-                    >
-                      繳費資訊
                     </button>
                   </li>
                 </ul>
@@ -616,7 +430,11 @@ const AccountPage = () => {
                       className=" top-0 left-0 w-full bg-white rounded-[6px] p-4 sm:p-8"
                     >
                       <h2 className="text-2xl font-semibold mb-4">我的訂單</h2>
-                      {orders.length === 0 ? (
+
+                      {/* 載入中顯示 skeleton；載入完成後再依訂單數量顯示結果 */}
+                      {ordersLoading ? (
+                        <OrderSkeletonGrid count={8} />
+                      ) : orders.length === 0 ? (
                         <p>尚未下過任何訂單。</p>
                       ) : (
                         <div className="py-6">
@@ -626,10 +444,8 @@ const AccountPage = () => {
                               const qrs = readQRCodes(meta);
                               const payType =
                                 order.paymentType ||
-                                readPaymentType(
-                                  meta,
-                                  order.payment_method_title
-                                );
+                                order.payment_method_title ||
+                                "—";
 
                               return (
                                 <li
@@ -673,7 +489,7 @@ const AccountPage = () => {
                                           order.date_created
                                         ).toLocaleDateString("zh-TW")}
                                       </p>
-                                      <p>付款方式：{payType || "—"}</p>
+                                      <p>付款方式：{payType}</p>
                                     </div>
 
                                     {/* eSIM QRCode（若有） */}
@@ -706,120 +522,6 @@ const AccountPage = () => {
                               );
                             })}
                           </ul>
-                        </div>
-                      )}
-                    </motion.div>
-                  )}
-
-                  {/* 繳費資訊（只列出 pending/on_hold 且有 offsite 的訂單） */}
-                  {activeTab === "payment" && (
-                    <motion.div
-                      key="payment"
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -20 }}
-                      transition={{ duration: 0.3 }}
-                      className=" top-0 left-0 w-full bg-white rounded-[6px] p-4 sm:p-8"
-                    >
-                      <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-2xl font-semibold">繳費資訊</h2>
-                        <button
-                          onClick={async () => {
-                            try {
-                              const list = await fetchOrders(userInfo);
-                              setOrders(list);
-                              log("手動刷新完成，訂單數 =", list.length);
-                            } catch (e) {
-                              error("手動刷新失敗：", e?.message);
-                            }
-                          }}
-                          className="text-sm px-3 py-1 border rounded hover:bg-gray-50"
-                        >
-                          重新整理
-                        </button>
-                      </div>
-
-                      {orders.length === 0 ? (
-                        <p>尚未下過任何訂單。</p>
-                      ) : (
-                        <div className="py-6">
-                          {(() => {
-                            const needPay = orders
-                              .map((o) => ({
-                                order: o,
-                                offsite: getOffsiteFromOrder(o),
-                              }))
-                              .filter(
-                                (x) =>
-                                  x.offsite &&
-                                  ["pending", "on_hold"].includes(
-                                    x.order.status
-                                  )
-                              );
-
-                            log(
-                              "繳費分頁 needPay 筆數 =",
-                              needPay.length,
-                              needPay.map((x) => ({
-                                id: x.order.id,
-                                status: x.order.status,
-                                offsite: x.offsite,
-                              }))
-                            );
-
-                            if (needPay.length === 0) {
-                              return (
-                                <p className="text-gray-600">
-                                  目前沒有待繳的訂單。
-                                </p>
-                              );
-                            }
-
-                            return (
-                              <ul className="grid grid-cols-1 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3">
-                                {needPay.map(({ order, offsite }) => {
-                                  const payType =
-                                    order.paymentType ||
-                                    readPaymentType(
-                                      order.meta_data || [],
-                                      order.payment_method_title
-                                    );
-                                  return (
-                                    <li
-                                      key={order.id}
-                                      className="border border-gray-200 rounded bg-white shadow-sm p-4 flex flex-col justify-between h-full"
-                                    >
-                                      <div className="space-y-3">
-                                        <div className="text-sm text-gray-600">
-                                          <p className="mt-1">
-                                            訂單編號：
-                                            <span className="font-medium">
-                                              {order.id}
-                                            </span>
-                                          </p>
-                                          <p>
-                                            狀態：
-                                            <span className="font-medium">
-                                              {statusLabel(order.status)}
-                                            </span>
-                                          </p>
-                                          <p>
-                                            總金額：NT$
-                                            <span className="font-medium">
-                                              {formatNTDNoDecimals(order.total)}
-                                            </span>
-                                          </p>
-                                          <p>付款方式：{payType || "—"}</p>
-                                        </div>
-
-                                        <OffsiteCard offsite={offsite} />
-                                      </div>
-                                    </li>
-                                  );
-                                })}
-                              </ul>
-                            );
-                          })()}
                         </div>
                       )}
                     </motion.div>

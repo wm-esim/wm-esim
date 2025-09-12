@@ -1,4 +1,4 @@
-// /pages/api/newebpay-notify.ts
+// pages/api/newebpay-notify.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { IncomingMessage } from "http";
 import crypto from "crypto";
@@ -6,13 +6,9 @@ import qs from "qs";
 import axios from "axios";
 
 export const config = { api: { bodyParser: false } };
-const NOTIFY_VERSION = "v4.3.0";
+const NOTIFY_VERSION = "v4.1.0";
 
-// DEBUG：啟動方式 NEWEBPAY_DEBUG=1 npm run dev
-const DEBUG = process.env.NEWEBPAY_DEBUG === "1";
-const dlog = (...a: any[]) => { if (DEBUG) console.log(...a); };
-
-/** 建議改 .env；此處沿用你現值 */
+/** 建議用環境變數；此處為你現值 */
 const MERCHANT_ID = "MS3788816305";
 const HASH_KEY    = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
 const HASH_IV     = "PKetlaZYZcZvlMmC";
@@ -25,28 +21,23 @@ const WC_CS = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (c) => (data += c));
+    req.on("data", c => (data += c));
     req.on("end", () => resolve(data));
     req.on("error", reject);
   });
 }
-function sha(encryptedHex: string, key: string, iv: string) {
-  const s = `HashKey=${key}&${encryptedHex}&HashIV=${iv}`;
+function sha(encrypted: string, key: string, iv: string) {
+  const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 function aesDecrypt(hex: string, key: string, iv: string) {
-  const decipher = crypto.createDecipheriv(
-    "aes-256-cbc",
-    Buffer.from(key, "utf8"),
-    Buffer.from(iv, "utf8")
-  );
+  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
   decipher.setAutoPadding(true);
   let out = decipher.update(hex, "hex", "utf8");
   out += decipher.final("utf8");
   return out;
 }
 function parseDecrypted(text: string): any {
-  // 兼容 JSON 或 x-www-form-urlencoded；且 Result 可能是字串
   try {
     const obj = JSON.parse(text);
     if (obj && typeof obj.Result === "string") {
@@ -64,53 +55,41 @@ function parseDecrypted(text: string): any {
   }
 }
 
-/** 翻頁找 5 頁，避免只看最新 50 筆找不到 */
 async function findWooOrderIdByNewebpayNo(merchantOrderNo: string): Promise<number | null> {
-  const auth = { username: WC_CK, password: WC_CS };
-  const base = `${WC_API_BASE}/orders`;
-  for (let page = 1; page <= 5; page++) {
-    const { data: orders } = await axios.get(base, {
-      auth,
-      params: { per_page: 50, page, orderby: "date", order: "desc" },
-    });
-    for (const o of orders || []) {
-      const hit = (o.meta_data || []).some(
-        (m: any) => m?.key === "newebpay_order_no" && m?.value === merchantOrderNo
-      );
-      if (hit) return Number(o.id);
-    }
-    if (!orders || orders.length < 50) break; // 沒有下一頁
+  const resp = await axios.get(`${WC_API_BASE}/orders`, {
+    auth: { username: WC_CK, password: WC_CS },
+    params: { per_page: 50, orderby: "date", order: "desc" },
+  });
+  const orders = resp.data || [];
+  for (const o of orders) {
+    const hit = (o.meta_data || []).some(
+      (m: any) => m?.key === "newebpay_order_no" && m?.value === merchantOrderNo
+    );
+    if (hit) return Number(o.id);
   }
   return null;
 }
 
-/** 僅判斷是否屬於「取號成功」（尚未入帳） */
-function isPaymentInfoPending(result: any) {
+function isPaid(result: any, status?: string) {
   const t = String(result?.PaymentType || "").toUpperCase();
-  // 取號事件不會有 PayTime；付款入帳才會有 PayTime（交給 callback）
-  return (
-    (t === "VACC" || t === "CVS" || t === "WEBATM" || t === "BARCODE") &&
-    !result?.PayTime
-  );
+  return !!result?.PayTime || (t === "CREDIT" && status === "SUCCESS");
 }
-
-/** 取號欄位總表（含 ATM 的 vAccount、WEBATM ATMAccNo、BARCODE 三段） */
-function buildOffsiteInfo(result: any) {
+function isOffsitePending(result: any) {
   const t = String(result?.PaymentType || "").toUpperCase();
-  const base: any = {
-    PaymentType: t,
+  return (t === "VACC" || t === "CVS" || t === "WEBATM") && !result?.PayTime;
+}
+function buildOffsiteInfo(result: any) {
+  return {
+    PaymentType: result?.PaymentType,
+    BankCode: result?.BankCode || result?.BankNo,
+    CodeNo: result?.CodeNo || result?.ATMAccNo || result?.PaymentNo,
+    PaymentNo: result?.PaymentNo,
+    StoreType: result?.StoreType,
+    ExpireDate: result?.ExpireDate || result?.ExpireTime,
     TradeNo: result?.TradeNo,
     Amt: result?.Amt,
-    ExpireDate: result?.ExpireDate || result?.ExpireTime,
   };
-  if (t === "VACC")    return { ...base, BankCode: result?.BankCode, vAccount: result?.vAccount };
-  if (t === "CVS")     return { ...base, StoreType: result?.StoreType, PaymentNo: result?.PaymentNo, CodeNo: result?.CodeNo };
-  if (t === "WEBATM")  return { ...base, BankCode: result?.BankCode, ATMAccNo: result?.ATMAccNo };
-  if (t === "BARCODE") return { ...base, Barcode1: result?.Barcode1, Barcode2: result?.Barcode2, Barcode3: result?.Barcode3 };
-  return base;
 }
-
-const ntd = (x: any) => `NT$ ${Math.round(Number(x || 0)).toLocaleString("zh-TW")}`;
 
 /* ---------- handler ---------- */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -121,152 +100,149 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const raw = await readBody(req);
-    const ct = String(req.headers["content-type"] || "");
-    const body: any = ct.toLowerCase().includes("application/json")
-      ? JSON.parse(raw || "{}")
-      : qs.parse(raw);
+    const ct  = String(req.headers["content-type"] || "");
+    const body: any = ct.includes("application/json") ? JSON.parse(raw || "{}") : qs.parse(raw);
 
+    const Status    = body?.Status as string | undefined;
     const TradeInfo = body?.TradeInfo as string | undefined;
     const TradeSha  = body?.TradeSha  as string | undefined;
 
-    // 缺參數直接回 200（避免重試風暴）
-    if (!TradeInfo || !TradeSha) {
-      dlog("[notify] early-return: missing TradeInfo/TradeSha");
-      res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
-      return res.status(200).end("OK");
-    }
-
     // ✅ 驗章
-    const calc = sha(TradeInfo, HASH_KEY, HASH_IV);
-    if (calc !== TradeSha) {
-      console.warn("[notify] TradeSha mismatch");
-      dlog("[notify] early-return: sha mismatch", { calc, TradeSha });
-      res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
-      return res.status(200).end("OK");
+    if (TradeInfo && TradeSha) {
+      const calc = sha(TradeInfo, HASH_KEY, HASH_IV);
+      if (calc !== TradeSha) {
+        console.warn("[notify] TradeSha mismatch");
+        res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
+        return res.status(200).end("OK");
+      }
     }
 
     // ✅ 解密
-    if (!/^[0-9a-fA-F]+$/.test(TradeInfo)) {
-      dlog("[notify] early-return: TradeInfo not hex");
-      res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
-      return res.status(200).end("OK");
+    let result: any = null;
+    if (TradeInfo && /^[0-9a-fA-F]+$/.test(TradeInfo)) {
+      const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
+      const payload   = parseDecrypted(decrypted);
+      result = payload?.Result || null;
+    } else {
+      console.warn("[notify] invalid TradeInfo");
     }
-    const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
-    const payload = parseDecrypted(decrypted);
-    dlog("[notify] payload =", JSON.stringify(payload, null, 2));
 
-    const result = payload?.Result || {};
     const merchantOrderNo = result?.MerchantOrderNo || body?.MerchantOrderNo;
     if (!merchantOrderNo) {
-      dlog("[notify] early-return: no MerchantOrderNo in Result/body");
-      res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
-      return res.status(200).end("OK");
-    }
-
-    // 只處理「取號成功」；入帳移交 callback
-    if (!isPaymentInfoPending(result)) {
-      dlog("[notify] early-return: not payment-info (maybe paid)", { type: result?.PaymentType, payTime: result?.PayTime });
       res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
       return res.status(200).end("OK");
     }
 
     const wooOrderId = await findWooOrderIdByNewebpayNo(merchantOrderNo);
     if (!wooOrderId) {
-      dlog("[notify] early-return: order not found for", merchantOrderNo);
       res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
       return res.status(200).end("OK");
     }
 
-    const offsite = buildOffsiteInfo(result);
-    const payType = String(offsite?.PaymentType || "");
+    const payType = String(result?.PaymentType || "").toUpperCase();
 
-    // 讀一次取得金額與冪等判斷
-    const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
-      auth: { username: WC_CK, password: WC_CS },
-    });
-    const alreadyNoted = (current?.meta_data || []).some(
-      (m: any) => m?.key === "newebpay_offsite_note_v2"
-    );
+    /* A) 取號成功（ATM/超商/WebATM）→ on-hold + meta + 備註（冪等） */
+    if (isOffsitePending(result)) {
+      const offsite = buildOffsiteInfo(result);
 
-    // ✅ 寫入狀態 + 取號資訊（冪等）
-    await axios.put(
-      `${WC_API_BASE}/orders/${wooOrderId}`,
-      {
-        status: "on-hold",
-        meta_data: [
-          { key: "newebpay_offsite_info", value: JSON.stringify(offsite) },
-          { key: "newebpay_payment_type", value: payType },
-          { key: "newebpay_expire_date",  value: String((offsite as any)?.ExpireDate || "") },
-
-          // 通用代碼（CVS/ATM 都能落到這）
-          {
-            key: "newebpay_code_no",
-            value: String(
-              (offsite as any)?.CodeNo ||
-              (offsite as any)?.PaymentNo ||
-              (offsite as any)?.vAccount ||
-              (offsite as any)?.ATMAccNo ||
-              ""
-            ),
-          },
-
-          // 指定欄位
-          { key: "newebpay_bank_code", value: String((offsite as any)?.BankCode || "") },
-          { key: "newebpay_vaccount",  value: String((offsite as any)?.vAccount || "") },
-          { key: "newebpay_store_type",value: String((offsite as any)?.StoreType || "") },
-          { key: "newebpay_atm_accno", value: String((offsite as any)?.ATMAccNo || "") },
-          { key: "newebpay_barcode_1", value: String((offsite as any)?.Barcode1 || "") },
-          { key: "newebpay_barcode_2", value: String((offsite as any)?.Barcode2 || "") },
-          { key: "newebpay_barcode_3", value: String((offsite as any)?.Barcode3 || "") },
-        ],
-      },
-      { auth: { username: WC_CK, password: WC_CS } }
-    );
-    dlog("[notify] wrote offsite meta for order", wooOrderId);
-
-    if (!alreadyNoted) {
-      const lines: string[] = [
-        `🔔 藍新金流 取號成功（${payType}）`,
-        (offsite as any).BankCode ? `銀行代碼：${(offsite as any).BankCode}` : "",
-        (offsite as any).vAccount
-          ? `虛擬帳號：${(offsite as any).vAccount}`
-          : (offsite as any).CodeNo || (offsite as any).PaymentNo
-          ? `繳費代碼：${(offsite as any).CodeNo || (offsite as any).PaymentNo}`
-          : (offsite as any).ATMAccNo
-          ? `WebATM 帳號：${(offsite as any).ATMAccNo}`
-          : "",
-        (offsite as any).StoreType ? `超商別：${(offsite as any).StoreType}` : "",
-        (offsite as any).Barcode1 ? `條碼一：${(offsite as any).Barcode1}` : "",
-        (offsite as any).Barcode2 ? `條碼二：${(offsite as any).Barcode2}` : "",
-        (offsite as any).Barcode3 ? `條碼三：${(offsite as any).Barcode3}` : "",
-        `應繳金額：${ntd((offsite as any).Amt ?? current?.total)}`,
-        (offsite as any).ExpireDate ? `繳費期限：${(offsite as any).ExpireDate}` : "",
-        (offsite as any).TradeNo ? `交易序號：${(offsite as any).TradeNo}` : "",
-        `商店訂單號：${merchantOrderNo}`,
-        "（系統自動加入）",
-      ].filter(Boolean);
-
-      await axios.post(
-        `${WC_API_BASE}/orders/${wooOrderId}/notes`,
-        { note: lines.join("\n"), customer_note: false },
-        { auth: { username: WC_CK, password: WC_CS } }
-      );
+      // 先更新狀態 + meta
       await axios.put(
         `${WC_API_BASE}/orders/${wooOrderId}`,
-        { meta_data: [{ key: "newebpay_offsite_note_v2", value: "1" }] },
+        {
+          status: "on-hold",
+          meta_data: [
+            { key: "newebpay_offsite_info", value: JSON.stringify(offsite) },
+            { key: "newebpay_payment_type", value: payType },
+            { key: "newebpay_expire_date",  value: String(offsite?.ExpireDate || "") },
+            { key: "newebpay_code_no",      value: String(offsite?.CodeNo || offsite?.PaymentNo || "") },
+            { key: "newebpay_bank_code",    value: String(offsite?.BankCode || "") },
+          ],
+        },
         { auth: { username: WC_CK, password: WC_CS } }
       );
-      dlog("[notify] wrote offsite note for order", wooOrderId);
-    } else {
-      dlog("[notify] note already exists for order", wooOrderId);
+
+      // 冪等：若已寫過備註就不重覆寫
+      const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+        auth: { username: WC_CK, password: WC_CS },
+      });
+      const alreadyNoted = (current?.meta_data || []).some(
+        (m: any) => m?.key === "newebpay_offsite_note_v1"
+      );
+
+      if (!alreadyNoted) {
+        const ntd = (x: any) => `NT$ ${Math.round(Number(x || 0)).toLocaleString("zh-TW")}`;
+        const lines: string[] = [
+          `🔔 藍新金流 取號成功（${payType}）`,
+          offsite.BankCode ? `銀行代碼：${offsite.BankCode}` : "",
+          (offsite.CodeNo || offsite.PaymentNo)
+            ? `轉帳帳號 / 繳費代碼：${offsite.CodeNo || offsite.PaymentNo}` : "",
+          offsite.StoreType ? `超商別：${offsite.StoreType}` : "",
+          `應繳金額：${ntd(offsite.Amt ?? current?.total)}`,
+          offsite.ExpireDate ? `繳費期限：${offsite.ExpireDate}` : "",
+          offsite.TradeNo ? `交易序號：${offsite.TradeNo}` : "",
+          `商店訂單號：${merchantOrderNo}`,
+          "（系統自動加入）",
+        ].filter(Boolean);
+
+        await axios.post(
+          `${WC_API_BASE}/orders/${wooOrderId}/notes`,
+          { note: lines.join("\n"), customer_note: false },
+          { auth: { username: WC_CK, password: WC_CS } }
+        );
+        await axios.put(
+          `${WC_API_BASE}/orders/${wooOrderId}`,
+          { meta_data: [{ key: "newebpay_offsite_note_v1", value: "1" }] },
+          { auth: { username: WC_CK, password: WC_CS } }
+        );
+      }
+    }
+
+    /* B) 已付款（信用卡或 ATM 真入帳）→ processing + 付款 meta（冪等） */
+    else if (isPaid(result, Status)) {
+      const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+        auth: { username: WC_CK, password: WC_CS },
+      });
+      const alreadyPaid = (current?.meta_data || []).some(
+        (m: any) => m?.key === "newebpay_pay_time"
+      );
+
+      if (!alreadyPaid) {
+        await axios.put(
+          `${WC_API_BASE}/orders/${wooOrderId}`,
+          {
+            status: "processing",
+            meta_data: [
+              { key: "newebpay_trade_no",     value: String(result?.TradeNo || "") },
+              { key: "newebpay_pay_time",     value: String(result?.PayTime || "") },
+              { key: "newebpay_payment_type", value: payType },
+            ],
+          },
+          { auth: { username: WC_CK, password: WC_CS } }
+        );
+
+        // （可選）寫一筆「已入帳」備註
+        await axios.post(
+          `${WC_API_BASE}/orders/${wooOrderId}/notes`,
+          {
+            note: `✅ 藍新金流已入帳（${payType}）\n交易序號：${result?.TradeNo || ""}\n入帳時間：${result?.PayTime || ""}`,
+            customer_note: false,
+          },
+          { auth: { username: WC_CK, password: WC_CS } }
+        );
+      }
+    }
+
+    // 其他狀態：略過
+    else {
+      console.log("[notify] noop:", { Status, PaymentType: result?.PaymentType });
     }
 
     res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
     return res.status(200).end("OK");
   } catch (e: any) {
-    console.error("[notify] error:", e?.response?.data || e?.message || e);
+    console.error("[notify] error:", e?.message || e);
     res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
-    // 一律回 200 避免藍新重試風暴
+    // 回 200 避免藍新重試風暴
     return res.status(200).end("OK");
   }
 }
