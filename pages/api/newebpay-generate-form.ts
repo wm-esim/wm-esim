@@ -143,7 +143,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     ReturnURL: "https://www.wmesim.com/api/newebpay-callback/",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify/",
-    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`,
+    ClientBackURL: "https://www.wmesim.com/thank-you/",
 
     // ✅ 動態付款方式
     PaymentMethod: paymentMethodValue,
