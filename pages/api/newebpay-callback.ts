@@ -1,4 +1,3 @@
-// /pages/api/newebpay-callback.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import crypto from "crypto";
 import axios from "axios";
@@ -89,11 +88,25 @@ function parseDecrypted(text: string): any {
   }
 }
 
+function hasPayMoment(result: any) {
+  return !!(result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime);
+}
+
+function firstPayMoment(result: any) {
+  return (
+    result?.PayTime ||
+    result?.PaymentTime ||
+    result?.PayDate ||
+    result?.CloseTime ||
+    ""
+  );
+}
+
 function buildOffsiteInfo(result: any) {
   return {
     PaymentType: String(result?.PaymentType || "").toUpperCase(), // VACC / CVS / WEBATM ...
-    BankCode:    result?.BankCode || result?.BankNo || "",
-    CodeNo:      result?.CodeNo   || result?.ATMAccNo || result?.PaymentNo || "",
+    BankCode:    result?.BankCode || result?.BankNo || result?.PayBankCode || "",
+    CodeNo:      result?.CodeNo   || result?.ATMAccNo || result?.PaymentNo || result?.PayerAccount5Code || "",
     PaymentNo:   result?.PaymentNo || "",
     StoreType:   result?.StoreType || "",
     ExpireDate:  result?.ExpireDate || result?.ExpireTime || "",
@@ -102,9 +115,11 @@ function buildOffsiteInfo(result: any) {
   };
 }
 
-function isPaid(result: any, status: string | undefined) {
-  const payType = String(result?.PaymentType || "").toUpperCase();
-  return !!result?.PayTime || (payType === "CREDIT" && status === "SUCCESS");
+function isPaid(result: any, status?: string) {
+  const t = String(result?.PaymentType || "").toUpperCase();
+  const paid = hasPayMoment(result);
+  if (t === "CREDIT") return status === "SUCCESS";
+  return paid;
 }
 
 const ntd = (x: any) => `NT$ ${Math.round(Number(x || 0)).toLocaleString("zh-TW")}`;
@@ -139,7 +154,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // 1) 找 Woo 訂單
     const { data: orders } = await axios.get(WOOCOMMERCE_API_URL, {
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
-      params: { per_page: 20, orderby: "date", order: "desc" },
+      params: { per_page: 50, orderby: "date", order: "desc" },
     });
 
     const order = (orders || []).find((o: any) =>
@@ -156,8 +171,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 2) 「待繳」類型（VACC/CVS/WEBATM）→ 寫 offsite 資訊 + 訂單備註，狀態 on-hold
     const payType = String(result?.PaymentType || "").toUpperCase();
-    const isOffsitePending =
-      (payType === "VACC" || payType === "CVS" || payType === "WEBATM") && !result?.PayTime;
+    const isOffsitePending = (payType === "VACC" || payType === "CVS" || payType === "WEBATM") && !hasPayMoment(result);
 
     console.log("[newebpay-callback] isOffsitePending =", isOffsitePending, "PaymentType =", payType);
 
@@ -230,7 +244,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             status: "processing",
             meta_data: [
               { key: "newebpay_trade_no",     value: String(result?.TradeNo || "") },
-              { key: "newebpay_pay_time",     value: String(result?.PayTime || "") },
+              { key: "newebpay_pay_time",     value: String(firstPayMoment(result)) },
               { key: "newebpay_payment_type", value: payType },
             ],
           },
