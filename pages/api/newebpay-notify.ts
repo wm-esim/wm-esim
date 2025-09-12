@@ -1,3 +1,4 @@
+// /pages/api/newebpay-notify.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { IncomingMessage } from "http";
 import crypto from "crypto";
@@ -40,17 +41,46 @@ function readBody(req: IncomingMessage): Promise<string> {
     req.on("error", reject);
   });
 }
+
 function sha(encrypted: string, key: string, iv: string) {
   const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
-function aesDecrypt(hex: string, key: string, iv: string) {
-  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-  decipher.setAutoPadding(true);
-  let out = decipher.update(hex, "hex", "utf8");
-  out += decipher.final("utf8");
-  return out;
+
+/** 先嘗試以 hex 解，失敗再以 base64 嘗試；兩者都失敗就 throw */
+function aesDecryptSafe(input: string, key: string, iv: string): string {
+  const ti = String(input || "").trim();
+
+  const tryDec = (enc: "hex" | "base64") => {
+    const decipher = crypto.createDecipheriv(
+      "aes-256-cbc",
+      Buffer.from(key, "utf8"),
+      Buffer.from(iv, "utf8")
+    );
+    decipher.setAutoPadding(true);
+    let out = decipher.update(ti, enc, "utf8");
+    out += decipher.final("utf8");
+    return out;
+  };
+
+  // 明顯是 hex（全為 0-9a-f）先試 hex
+  if (/^[0-9a-fA-F]+$/.test(ti)) {
+    try {
+      return tryDec("hex");
+    } catch {
+      // 再試 base64
+      return tryDec("base64");
+    }
+  } else {
+    // 不是純 hex，先試 base64，再保底試 hex
+    try {
+      return tryDec("base64");
+    } catch {
+      return tryDec("hex");
+    }
+  }
 }
+
 function parseDecrypted(text: string): any {
   try {
     const obj = JSON.parse(text);
@@ -325,15 +355,15 @@ async function fulfillPaidOrder(params: {
     if (invoiceRes.data.Status === "SUCCESS") {
       const invoiceJson = JSON.parse(invoiceRes.data.Result);
       await axios.post(
-        `${WC_API_BASE}/orders/${orderId}/notes`,
+        `${wooBase}/orders/${orderId}/notes`,
         {
           note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
           customer_note: false,
         },
-        { auth: { username: WC_CK, password: WC_CS } }
+        { auth: { username: ck, password: cs } }
       );
       await axios.put(
-        `${WC_API_BASE}/orders/${orderId}`,
+        `${wooBase}/orders/${orderId}`,
         {
           meta_data: [
             { key: "invoice_number",  value: invoiceJson.InvoiceNumber },
@@ -342,7 +372,7 @@ async function fulfillPaidOrder(params: {
             { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
           ],
         },
-        { auth: { username: WC_CK, password: WC_CS } }
+        { auth: { username: ck, password: cs } }
       );
     } else {
       console.error("發票開立失敗：", invoiceRes.data);
@@ -365,10 +395,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const body: any = ct.includes("application/json") ? JSON.parse(raw || "{}") : qs.parse(raw);
 
     const Status    = body?.Status as string | undefined;
-    const TradeInfo = body?.TradeInfo as string | undefined;
-    const TradeSha  = body?.TradeSha  as string | undefined;
+    const TradeInfo = (body?.TradeInfo as string | undefined)?.trim();
+    const TradeSha  = (body?.TradeSha  as string | undefined)?.trim();
 
-    // ✅ 驗章
+    // ✅ 驗章（有帶 TI/TS 才驗）
     if (TradeInfo && TradeSha) {
       const calc = sha(TradeInfo, HASH_KEY, HASH_IV);
       if (calc !== TradeSha) {
@@ -378,19 +408,57 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // ✅ 解密
+    // ✅ 解密（或平面 Result）
     let result: any = null;
-    if (TradeInfo && /^[0-9a-fA-F]+$/.test(TradeInfo)) {
-      const decrypted = aesDecrypt(TradeInfo, HASH_KEY, HASH_IV);
-      const payload   = parseDecrypted(decrypted);
-      result = payload?.Result || null;
-    } else {
-      // 少數情況（平台測試）會直接給平面欄位
-      result = body?.Result || result;
-      if (!result) console.warn("[notify] invalid TradeInfo");
+    let decryptedStr = "";
+    let decryptError: string | null = null;
+
+    if (TradeInfo) {
+      try {
+        decryptedStr = aesDecryptSafe(TradeInfo, HASH_KEY, HASH_IV);
+        const payload = parseDecrypted(decryptedStr);
+        result = payload?.Result || null;
+      } catch (e: any) {
+        decryptError = e?.message || String(e);
+      }
     }
 
-    const merchantOrderNo = result?.MerchantOrderNo || body?.MerchantOrderNo;
+    if (!result) {
+      // 少數情況（平台測試）會直接給平面欄位
+      result = body?.Result || result;
+    }
+
+    const merchantOrderNo =
+      result?.MerchantOrderNo ||
+      body?.MerchantOrderNo ||
+      body?.MerchantOrderID ||
+      "";
+
+    // 若解密失敗但拿得到訂單號，寫一筆 debug 幫助排查
+    if (decryptError && merchantOrderNo) {
+      try {
+        const orderId = await findWooOrderIdByNewebpayNo(merchantOrderNo);
+        if (orderId) {
+          await axios.post(
+            `${WC_API_BASE}/orders/${orderId}/notes`,
+            {
+              note: [
+                "🧪 [DEBUG] Notify 解密失敗",
+                `Error=${decryptError}`,
+                `ct=${ct}`,
+                `tradeInfoLen=${(TradeInfo || "").length}`,
+                `shaChecked=${!!(TradeInfo && TradeSha)}`,
+              ].join("\n"),
+              customer_note: false,
+            },
+            { auth: { username: WC_CK, password: WC_CS } }
+          );
+        }
+      } catch (e) {
+        console.warn("[notify] debug note (decrypt fail) failed:", (e as any)?.message || e);
+      }
+    }
+
     if (!merchantOrderNo) {
       res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
       return res.status(200).end("OK");
@@ -398,30 +466,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const wooOrderId = await findWooOrderIdByNewebpayNo(merchantOrderNo);
     if (!wooOrderId) {
-      try {
-  await axios.post(
-    `${WC_API_BASE}/orders/${wooOrderId}/notes`,
-    {
-      note: [
-        "🧪 [DEBUG] 收到 Newebpay Notify",
-        `Status=${Status || ""}`,
-        `PaymentType=${String(result?.PaymentType || "")}`,
-        `MerchantOrderNo=${merchantOrderNo}`,
-        `HasPayMoment=${Boolean(
-          result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime
-        )}`,
-        `PayTime=${result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime || ""}`,
-      ].join("\n"),
-      customer_note: false, // 不寄給客人，只寫後台備註
-    },
-    { auth: { username: WC_CK, password: WC_CS } }
-  );
-} catch (e: any) {
-  console.warn("[notify] debug note failed:", e?.message || e);
-}
-
       res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
       return res.status(200).end("OK");
+    }
+
+    // 🧪 進入分支前，先寫一筆 DEBUG 備註（方便你看實際欄位）
+    try {
+      await axios.post(
+        `${WC_API_BASE}/orders/${wooOrderId}/notes`,
+        {
+          note: [
+            "🧪 [DEBUG] 收到 Newebpay Notify",
+            `Status=${Status || ""}`,
+            `PaymentType=${String(result?.PaymentType || "")}`,
+            `MerchantOrderNo=${merchantOrderNo}`,
+            `HasPayMoment=${Boolean(
+              result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime
+            )}`,
+            `PayTime=${firstPayMoment(result)}`,
+          ].join("\n"),
+          customer_note: false,
+        },
+        { auth: { username: WC_CK, password: WC_CS } }
+      );
+    } catch (e) {
+      console.warn("[notify] debug note failed:", (e as any)?.message || e);
     }
 
     const payType = String(result?.PaymentType || "").toUpperCase();
