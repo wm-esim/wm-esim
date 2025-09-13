@@ -47,7 +47,7 @@ function sha(encrypted: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 
-/** 先嘗試以 hex 解，失敗再以 base64 嘗試；兩者都失敗就 throw */
+/** 先嘗試 hex；失敗再以 base64；兩者都失敗就 throw */
 function aesDecryptSafe(input: string, key: string, iv: string): string {
   const ti = String(input || "").trim();
 
@@ -63,21 +63,10 @@ function aesDecryptSafe(input: string, key: string, iv: string): string {
     return out;
   };
 
-  // 明顯是 hex（全為 0-9a-f）先試 hex
   if (/^[0-9a-fA-F]+$/.test(ti)) {
-    try {
-      return tryDec("hex");
-    } catch {
-      // 再試 base64
-      return tryDec("base64");
-    }
+    try { return tryDec("hex"); } catch { return tryDec("base64"); }
   } else {
-    // 不是純 hex，先試 base64，再保底試 hex
-    try {
-      return tryDec("base64");
-    } catch {
-      return tryDec("hex");
-    }
+    try { return tryDec("base64"); } catch { return tryDec("hex"); }
   }
 }
 
@@ -148,6 +137,20 @@ async function findWooOrderIdByNewebpayNo(merchantOrderNo: string): Promise<numb
     if (hit) return Number(o.id);
   }
   return null;
+}
+
+/** ===== Woo 備註工具 ===== */
+async function addNote(orderId: number, lines: string | string[]) {
+  try {
+    const note = Array.isArray(lines) ? lines.join("\n") : lines;
+    await axios.post(
+      `${WC_API_BASE}/orders/${orderId}/notes`,
+      { note, customer_note: false },
+      { auth: { username: WC_CK, password: WC_CS } }
+    );
+  } catch (e: any) {
+    console.warn("[notify] addNote failed:", e?.message || e);
+  }
 }
 
 /** ===== 金額處理（分） ===== */
@@ -354,14 +357,12 @@ async function fulfillPaidOrder(params: {
 
     if (invoiceRes.data.Status === "SUCCESS") {
       const invoiceJson = JSON.parse(invoiceRes.data.Result);
-      await axios.post(
-        `${wooBase}/orders/${orderId}/notes`,
-        {
-          note: `✅ 發票已開立\n發票號碼：${invoiceJson.InvoiceNumber}\n隨機碼：${invoiceJson.RandomNum}\n開立時間：${invoiceJson.CreateTime}`,
-          customer_note: false,
-        },
-        { auth: { username: ck, password: cs } }
-      );
+      await addNote(orderId, [
+        "✅ 發票已開立",
+        `發票號碼：${invoiceJson.InvoiceNumber}`,
+        `隨機碼：${invoiceJson.RandomNum}`,
+        `開立時間：${invoiceJson.CreateTime}`,
+      ]);
       await axios.put(
         `${wooBase}/orders/${orderId}`,
         {
@@ -372,10 +373,11 @@ async function fulfillPaidOrder(params: {
             { key: "invoice_qrcode_r", value: invoiceJson.QRcodeR },
           ],
         },
-        { auth: { username: ck, password: cs } }
+        { auth: { username: WC_CK, password: WC_CS } }
       );
     } else {
       console.error("發票開立失敗：", invoiceRes.data);
+      await addNote(orderId, `⚠️ 發票開立失敗：${JSON.stringify(invoiceRes.data).slice(0, 800)}`);
     }
   }
 }
@@ -389,6 +391,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).end("Method Not Allowed");
   }
 
+  const reqId = `r${Math.random().toString(36).slice(2, 8)}`;
+  const t0 = Date.now();
   try {
     const raw = await readBody(req);
     const ct  = String(req.headers["content-type"] || "");
@@ -398,11 +402,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const TradeInfo = (body?.TradeInfo as string | undefined)?.trim();
     const TradeSha  = (body?.TradeSha  as string | undefined)?.trim();
 
+    console.log(`[notify:${reqId}] start`, {
+      ct,
+      rawLen: (raw || "").length,
+      hasTI: !!TradeInfo,
+      hasTS: !!TradeSha,
+      Status,
+      ip: (req.headers["x-forwarded-for"] as string) || "",
+      ua: req.headers["user-agent"] || "",
+    });
+
     // ✅ 驗章（有帶 TI/TS 才驗）
     if (TradeInfo && TradeSha) {
       const calc = sha(TradeInfo, HASH_KEY, HASH_IV);
-      if (calc !== TradeSha) {
-        console.warn("[notify] TradeSha mismatch");
+      const pass = calc === TradeSha;
+      console.log(`[notify:${reqId}] sha check`, { pass, calc, TradeSha, tiLooksHex: /^[0-9a-fA-F]+$/.test(TradeInfo) });
+      if (!pass) {
         res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
         return res.status(200).end("OK");
       }
@@ -418,14 +433,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         decryptedStr = aesDecryptSafe(TradeInfo, HASH_KEY, HASH_IV);
         const payload = parseDecrypted(decryptedStr);
         result = payload?.Result || null;
+        console.log(`[notify:${reqId}] decryptedOK`, { decLen: decryptedStr.length, hasResult: !!result });
       } catch (e: any) {
         decryptError = e?.message || String(e);
+        console.warn(`[notify:${reqId}] decryptFail`, decryptError);
       }
     }
 
     if (!result) {
-      // 少數情況（平台測試）會直接給平面欄位
       result = body?.Result || result;
+      if (result) console.log(`[notify:${reqId}] use flat Result`);
     }
 
     const merchantOrderNo =
@@ -439,67 +456,53 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       try {
         const orderId = await findWooOrderIdByNewebpayNo(merchantOrderNo);
         if (orderId) {
-          await axios.post(
-            `${WC_API_BASE}/orders/${orderId}/notes`,
-            {
-              note: [
-                "🧪 [DEBUG] Notify 解密失敗",
-                `Error=${decryptError}`,
-                `ct=${ct}`,
-                `tradeInfoLen=${(TradeInfo || "").length}`,
-                `shaChecked=${!!(TradeInfo && TradeSha)}`,
-              ].join("\n"),
-              customer_note: false,
-            },
-            { auth: { username: WC_CK, password: WC_CS } }
-          );
+          await addNote(orderId, [
+            "🧪 [DEBUG] Notify 解密失敗",
+            `reqId=${reqId}`,
+            `Error=${decryptError}`,
+            `ct=${ct}`,
+            `tradeInfoLen=${(TradeInfo || "").length}`,
+            `shaChecked=${!!(TradeInfo && TradeSha)}`,
+          ]);
         }
       } catch (e) {
-        console.warn("[notify] debug note (decrypt fail) failed:", (e as any)?.message || e);
+        console.warn(`[notify:${reqId}] debug note (decrypt fail) failed:`, (e as any)?.message || e);
       }
     }
 
     if (!merchantOrderNo) {
+      console.warn(`[notify:${reqId}] missing MerchantOrderNo`);
       res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
       return res.status(200).end("OK");
     }
 
     const wooOrderId = await findWooOrderIdByNewebpayNo(merchantOrderNo);
     if (!wooOrderId) {
+      console.warn(`[notify:${reqId}] order not found by MerchantOrderNo=${merchantOrderNo}`);
       res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
       return res.status(200).end("OK");
     }
 
-    // 🧪 進入分支前，先寫一筆 DEBUG 備註（方便你看實際欄位）
-    try {
-      await axios.post(
-        `${WC_API_BASE}/orders/${wooOrderId}/notes`,
-        {
-          note: [
-            "🧪 [DEBUG] 收到 Newebpay Notify",
-            `Status=${Status || ""}`,
-            `PaymentType=${String(result?.PaymentType || "")}`,
-            `MerchantOrderNo=${merchantOrderNo}`,
-            `HasPayMoment=${Boolean(
-              result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime
-            )}`,
-            `PayTime=${firstPayMoment(result)}`,
-          ].join("\n"),
-          customer_note: false,
-        },
-        { auth: { username: WC_CK, password: WC_CS } }
-      );
-    } catch (e) {
-      console.warn("[notify] debug note failed:", (e as any)?.message || e);
-    }
+    // 🧪 進入分支前，先寫一筆 DEBUG 備註
+    await addNote(wooOrderId, [
+      "🧪 [DEBUG] 收到 Newebpay Notify",
+      `reqId=${reqId}`,
+      `Status=${Status || ""}`,
+      `PaymentType=${String(result?.PaymentType || "")}`,
+      `MerchantOrderNo=${merchantOrderNo}`,
+      `HasPayMoment=${Boolean(
+        result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime
+      )}`,
+      `PayTime=${firstPayMoment(result)}`,
+    ]);
 
     const payType = String(result?.PaymentType || "").toUpperCase();
 
     /* A) 取號成功（ATM/超商/WebATM）→ on-hold + meta + 備註（冪等） */
     if (isOffsitePending(result)) {
+      console.log(`[notify:${reqId}] branch=offsite-pending`, { payType });
       const offsite = buildOffsiteInfo(result);
 
-      // 先更新狀態 + meta
       await axios.put(
         `${WC_API_BASE}/orders/${wooOrderId}`,
         {
@@ -515,7 +518,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         { auth: { username: WC_CK, password: WC_CS } }
       );
 
-      // 冪等：若已寫過備註就不重覆寫
       const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
         auth: { username: WC_CK, password: WC_CS },
       });
@@ -534,14 +536,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           offsite.ExpireDate ? `繳費期限：${offsite.ExpireDate}` : "",
           offsite.TradeNo ? `交易序號：${offsite.TradeNo}` : "",
           `商店訂單號：${merchantOrderNo}`,
+          `reqId=${reqId}`,
           "（系統自動加入）",
         ].filter(Boolean);
-
-        await axios.post(
-          `${WC_API_BASE}/orders/${wooOrderId}/notes`,
-          { note: lines.join("\n"), customer_note: false },
-          { auth: { username: WC_CK, password: WC_CS } }
-        );
+        await addNote(wooOrderId, lines);
         await axios.put(
           `${WC_API_BASE}/orders/${wooOrderId}`,
           { meta_data: [{ key: "newebpay_offsite_note_v1", value: "1" }] },
@@ -552,6 +550,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     /* B) 已付款（信用卡或 ATM 真入帳）→ processing + 付款 meta + eSIM + 發票（冪等） */
     else if (isPaid(result, Status)) {
+      console.log(`[notify:${reqId}] branch=paid`, { payType });
       const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
         auth: { username: WC_CK, password: WC_CS },
       });
@@ -573,7 +572,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           { auth: { username: WC_CK, password: WC_CS } }
         );
 
-        // 讀完整訂單，進行 eSIM + 發票（與 callback 同步）
+        // 讀完整訂單，進行 eSIM + 發票
         const { data: fullOrder } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
           auth: { username: WC_CK, password: WC_CS },
         });
@@ -588,29 +587,42 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           result,
         });
 
-        // 可選：寫一筆「已入帳」備註
-        await axios.post(
-          `${WC_API_BASE}/orders/${wooOrderId}/notes`,
-          {
-            note: `✅ 藍新金流已入帳（${payType}）\n交易序號：${result?.TradeNo || ""}\n入帳時間：${firstPayMoment(result)}`,
-            customer_note: false,
-          },
-          { auth: { username: WC_CK, password: WC_CS } }
-        );
+        await addNote(wooOrderId, [
+          `✅ 藍新金流已入帳（${payType}）`,
+          `交易序號：${result?.TradeNo || ""}`,
+          `入帳時間：${firstPayMoment(result)}`,
+          `reqId=${reqId}`,
+        ]);
+      } else {
+        console.log(`[notify:${reqId}] alreadyPaid=true (idempotent)`);
       }
     }
 
     // 其他狀態：略過
     else {
-      console.log("[notify] noop:", { Status, PaymentType: result?.PaymentType });
+      console.log(`[notify:${reqId}] noop`, { Status, PaymentType: result?.PaymentType });
+      await addNote(wooOrderId, [
+        "🧪 [DEBUG] noop（非取號/非入帳）",
+        `reqId=${reqId}`,
+        `Status=${Status || ""}`,
+        `PaymentType=${String(result?.PaymentType || "")}`,
+        `PayTime=${firstPayMoment(result)}`,
+      ]);
     }
 
+    console.log(`[notify:${reqId}] done in ${Date.now() - t0}ms`);
     res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
+    res.setHeader("X-Req-Id", reqId);
     return res.status(200).end("OK");
   } catch (e: any) {
-    console.error("[notify] error:", e?.message || e);
+    console.error(`[notify:${reqId}] error:`, e?.message || e);
     res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
-    // 回 200 避免藍新重試風暴
+    res.setHeader("X-Req-Id", reqId);
+    // 回 200 避免藍新重試風暴（仍寫 Woo 備註有助追查）
+    try {
+      const body = await readBody(req as any);
+      await addNote(0 as any, `⚠️ handler error reqId=${reqId} msg=${e?.message || e} rawLen=${(body || "").length}`);
+    } catch {}
     return res.status(200).end("OK");
   }
 }
