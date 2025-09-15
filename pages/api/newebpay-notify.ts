@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 
 /** 讓 Newebpay 能送 raw body（必須） */
 export const config = { api: { bodyParser: false } };
-const NOTIFY_VERSION = "v5.2.1";
+const NOTIFY_VERSION = "v5.3.0";
 
 /** ===== 建議改用 .env（此處沿用你現值） ===== */
 const MERCHANT_ID = "MS3788816305";
@@ -374,52 +374,89 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.log(`[notify:${rid}] parsed body keys=${Object.keys(body || {}).join(",")}`);
 
     /** ★★★ 從 raw body 直接擷取參數，不讓任何 parser 改動 ★★★ */
-    const getParamFromRaw = (name: string): string | undefined => {
-      // 僅切出 name= 到下一個 & 之間的原始片段；不把 '+' 轉成空白
+    const getRawParam = (name: string): string | undefined => {
       const start = raw.indexOf(`${name}=`);
       if (start < 0) return undefined;
       const s = start + name.length + 1;
       const amp = raw.indexOf("&", s);
-      const val = amp === -1 ? raw.slice(s) : raw.slice(s, amp);
-      // 只在真的有 % 編碼時，才 decode 一次（避免多重 decode）
-      return /%[0-9a-fA-F]{2}/.test(val) ? decodeURIComponent(val) : val;
+      return (amp === -1 ? raw.slice(s) : raw.slice(s, amp)).trim();
     };
 
-    const TradeInfo = (getParamFromRaw("TradeInfo") || "").trim();
-    const TradeSha  = (getParamFromRaw("TradeSha")  || "").trim();
+    const TI_raw = getRawParam("TradeInfo") || "";
+    const TS_raw = getRawParam("TradeSha")  || "";
 
-    const tiLen = TradeInfo.length;
+    /** 產生多個候選：原樣、decode 一次、將空白→+ 後再 decode（避免上游把 + 變空白或多/少 decode） */
+    const getTIcandidates = (ti: string): string[] => {
+      const out: string[] = [];
+      const hasPct = /%[0-9a-fA-F]{2}/.test(ti);
+
+      // 1) 原樣（最重要，避免把 + 變空白）
+      out.push(ti);
+
+      // 2) 有 % 才 decode 一次
+      if (hasPct) {
+        try { out.push(decodeURIComponent(ti)); } catch {}
+      }
+
+      // 3) 無 % 但含空白，推測 + 被轉空白
+      if (!hasPct && /\s/.test(ti)) {
+        const restored = ti.replace(/\s/g, "+");
+        out.push(restored);
+        try { out.push(decodeURIComponent(restored)); } catch {}
+      }
+
+      return Array.from(new Set(out.filter(Boolean)));
+    };
+
+    const TI_candidates = getTIcandidates(TI_raw);
+
+    // 依序比對 SHA，找到與 TradeSha 相符的版本
+    let TradeInfo = "";
+    let TradeSha  = TS_raw;
     let shaOk = false;
-    if (TradeInfo && TradeSha) {
-      shaOk = sha(TradeInfo, HASH_KEY, HASH_IV) === TradeSha;
-      console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${tiLen}, src=raw-only`);
-      if (!shaOk) console.warn(`[notify:${rid}] TradeSha mismatch`);
-    } else {
-      console.warn(`[notify:${rid}] no TI/TS in raw`);
+    for (const candidate of TI_candidates) {
+      if (sha(candidate, HASH_KEY, HASH_IV) === TradeSha) {
+        TradeInfo = candidate;
+        shaOk = true;
+        break;
+      }
     }
+    console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}, src=raw-only, tried=${TI_candidates.length}`);
+    if (!shaOk) console.warn(`[notify:${rid}] TradeSha mismatch (all candidates tried)`);
 
-    // 解密（僅在 shaOk 才解）
+    // ---- 解密：先用通過 SHA 的版本；不行再對所有候選重試 ----
     let result: any = null;
     let decryptError: string | null = null;
 
-    if (TradeInfo && shaOk) {
+    const tryDecrypt = (ti: string) => {
       try {
-        const decryptedStr = aesDecryptSafe(TradeInfo, HASH_KEY, HASH_IV);
-        const payload = parseDecrypted(decryptedStr);
-        result = payload?.Result || null;
-        if (DEBUG) {
-          const pKeys = Object.keys(payload || {});
-          const rKeys = result ? Object.keys(result) : [];
-          console.log(`[notify:${rid}] payloadKeys=${pKeys.join(",")}, resultKeys=${rKeys.join(",")}`);
-        }
+        // 先走通用解（hex/base64 自動判斷）
+        try { return parseDecrypted(aesDecryptSafe(ti, HASH_KEY, HASH_IV)); } catch {}
+        // 再強制 base64（確保沒有空白）
+        const tiBase64 = ti.replace(/\s/g, "+");
+        const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(HASH_KEY, "utf8"), Buffer.from(HASH_IV, "utf8"));
+        decipher.setAutoPadding(true);
+        let out = decipher.update(tiBase64, "base64", "utf8");
+        out += decipher.final("utf8");
+        return parseDecrypted(out);
       } catch (e: any) {
         decryptError = e?.message || String(e);
-        console.warn(`[notify:${rid}] decrypt error: ${decryptError}`);
+        return null;
       }
-    } else if (!TradeInfo && body?.Result) {
-      // 僅供你本地 curl 測試；正式來自藍新不會走這裡
-      result = body.Result;
-      console.log(`[notify:${rid}] using flat Result (test mode)`);
+    };
+
+    if (shaOk && TradeInfo) {
+      const payload = tryDecrypt(TradeInfo);
+      result = payload?.Result ?? null;
+    }
+    if (!result) {
+      for (const cand of TI_candidates) {
+        const payload = tryDecrypt(cand);
+        if (payload?.Result) { result = payload.Result; break; }
+      }
+    }
+    if (!result) {
+      console.warn(`[notify:${rid}] decrypt error: ${decryptError || "unknown"}, candidates=${TI_candidates.length}`);
     }
 
     const merchantOrderNo =
@@ -427,7 +464,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!merchantOrderNo) {
       const preview = raw.slice(0, 512);
-      console.warn(`[notify:${rid}] missing MerchantOrderNo. ct=${ct}, shaOk=${shaOk}, tiLen=${tiLen}`);
+      console.warn(`[notify:${rid}] missing MerchantOrderNo. ct=${ct}, shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}`);
       if (DEBUG) {
         if (ECHO_BODY) console.log(`[notify:${rid}] raw[0..512]=${preview}`);
         if (ECHO_HEADERS) console.log(`[notify:${rid}] headers(full)=`, safeHeaders);
@@ -450,7 +487,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             `🧪 [DEBUG] Newebpay Notify (reqId=${rid})`,
             `Status=${Status || ""}`,
             `shaOk=${shaOk}`,
-            `tiLen=${tiLen}`,
+            `tiLen=${(TradeInfo || TI_raw).length}`,
             decryptError ? `decryptError=${decryptError}` : "",
             `PaymentType=${String(result?.PaymentType || "")}`,
             `HasPayMoment=${Boolean(hasPayMoment(result))}`,
