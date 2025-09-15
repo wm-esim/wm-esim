@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 
 /** 讓 Newebpay 能送 raw body（必須） */
 export const config = { api: { bodyParser: false } };
-const NOTIFY_VERSION = "v5.1.0";
+const NOTIFY_VERSION = "v5.2.0";
 
 /** ===== 建議改用 .env（此處沿用你現值） ===== */
 const MERCHANT_ID = "MS3788816305";
@@ -33,10 +33,7 @@ const PLAN_ID_MAP: Record<string, string> = {
 };
 
 /* ------------------------- Debug 控制 ------------------------- */
-/** 以環境變數或 query 參數開關回顯內容（避免洩漏太多） */
-function isOn(v?: string | string[]) {
-  return String(Array.isArray(v) ? v[0] : v || "").trim() === "1";
-}
+function isOn(v?: string | string[]) { return String(Array.isArray(v) ? v[0] : v || "").trim() === "1"; }
 const ENV_DEBUG_ON  = String(process.env.NEWEBPAY_DEBUG || "") === "1";
 const ENV_ECHO_HDR  = String(process.env.NEWEBPAY_ECHO_HEADERS || "") === "1";
 const ENV_ECHO_BODY = String(process.env.NEWEBPAY_ECHO_BODY || "") === "1";
@@ -261,7 +258,10 @@ async function fulfillPaidOrder(params: {
     const paidRows = rows.map((r, idx) => {
       if (subSum === 0) return { ...r, paidCents: 0 };
       const ratio = r.subtotalCents / subSum;
-      const alloc = idx === rows.length - 1 ? discountCents : Math.min(discountCents, roundHalfUp(discountCents * ratio));
+      const alloc =
+        idx === rows.length - 1
+          ? discountCents
+          : Math.min(discountCents, roundHalfUp(discountCents * ratio));
       discountCents -= alloc;
       const paid = Math.max(0, r.subtotalCents - alloc);
       return { ...r, paidCents: paid };
@@ -398,31 +398,39 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     })();
 
     console.log(`[notify:${rid}] hit, ct=${ct}, rawLen=${raw.length}`);
-    if (DEBUG && ECHO_HEADERS) {
-      console.log(`[notify:${rid}] headers=`, safeHeaders);
-    }
+    if (DEBUG && ECHO_HEADERS) console.log(`[notify:${rid}] headers=`, safeHeaders);
 
+    // 為了讀其它欄位（Status 等），仍保留 parse；但 TI/TS 走 raw
     const body: any = ct.includes("application/json") ? JSON.parse(raw || "{}") : qs.parse(raw);
     const bodyKeys = Object.keys(body || {});
     console.log(`[notify:${rid}] parsed body keys=${bodyKeys.join(",")}`);
 
-    const Status    = body?.Status as string | undefined;
-    const TradeInfo = (body?.TradeInfo as string | undefined)?.trim();
-    const TradeSha  = (body?.TradeSha  as string | undefined)?.trim();
+    const Status = body?.Status as string | undefined;
 
-    const tiLen = TradeInfo?.length || 0;
+    // === ★ 從 raw 抓「原始」TI/TS（僅 decodeURIComponent 一次） ===
+    const cap = (name: string) => {
+      const re = new RegExp(`(?:^|[&?])${name}=([^&]+)`);
+      const m = raw.match(re);
+      if (!m) return undefined;
+      try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+    };
+    const TI_RAW  = cap("TradeInfo");
+    const TS_RAW  = cap("TradeSha");
+
+    const TradeInfo = (TI_RAW || "").trim();
+    const TradeSha  = (TS_RAW || "").trim();
+
+    const tiLen = TradeInfo.length;
     let shaOk = false;
     if (TradeInfo && TradeSha) {
       shaOk = sha(TradeInfo, HASH_KEY, HASH_IV) === TradeSha;
-      console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${tiLen}`);
-      if (!shaOk) {
-        console.warn(`[notify:${rid}] TradeSha mismatch`);
-      }
+      console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${tiLen}, src=raw`);
+      if (!shaOk) console.warn(`[notify:${rid}] TradeSha mismatch`);
     } else {
-      console.log(`[notify:${rid}] no TI/TS pair provided`);
+      console.warn(`[notify:${rid}] no TI/TS in raw`);
     }
 
-    // 解密（或平面 Result）
+    // === 解密（僅在 shaOk 才解） ===
     let result: any = null;
     let decryptedStr = "";
     let decryptError: string | null = null;
@@ -454,7 +462,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       "";
 
     if (!merchantOrderNo) {
-      // 盡量留下排查線索
       const preview = raw.slice(0, 512);
       console.warn(`[notify:${rid}] missing MerchantOrderNo. ct=${ct}, shaOk=${shaOk}, tiLen=${tiLen}`);
       if (DEBUG) {
