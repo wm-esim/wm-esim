@@ -259,7 +259,7 @@ export default function ThankYouPage() {
         )}
 
         {!loading && qrcodes.length === 0 && (
-          <p className="text-red-500">無法取得 QRCode，請聯繫客服協助</p>
+          <p className="text-red-500">無法取得 QRCode，請聯繫客服</p>
         )}
       </div>
     </div>
