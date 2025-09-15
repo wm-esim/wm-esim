@@ -79,10 +79,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const envAllowedRaw = process.env.NEWEBPAY_ALLOWED_METHODS || "CREDIT,VACC,WEBATM";
   const envAllowed = normalizeMethods(envAllowedRaw);
   const requested = normalizeMethods(orderInfo?.methods ?? orderInfo?.method);
-  const chosen = (requested.length
-    ? envAllowed.filter((m) => requested.includes(m))
-    : envAllowed
-  );
+  const chosen = (requested.length ? envAllowed.filter((m) => requested.includes(m)) : envAllowed);
   const methods = chosen.length ? chosen : ["CREDIT"];
   const flags = buildFlags(methods);
   const paymentMethodValue = methods.join(",");
@@ -140,21 +137,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     ItemDesc: "虛擬商品訂單",
     Email: orderInfo?.email || "test@example.com",
     LoginType: "0",
-
     ReturnURL: "https://www.wmesim.com/api/newebpay-callback/",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify/",
-   ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`,
-
-
+    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`, // ← 保留你原本意圖
     // ✅ 動態付款方式
     PaymentMethod: paymentMethodValue,
     CREDIT: flags.CREDIT,
     VACC: flags.VACC,
     WEBATM: flags.WEBATM,
-    CVS: flags.CVS,        // 若白名單不含，會是 "0"
+    CVS: flags.CVS, // 若白名單不含，會是 "0"
     BARCODE: flags.BARCODE,
     LINEPAY: flags.LINEPAY,
-
     ...(needExpire ? { ExpireDate: String(orderInfo?.expireMinutes ?? 1440) } : {}),
   };
 
