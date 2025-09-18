@@ -158,7 +158,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // 回傳/通知
     ReturnURL: "https://www.wmesim.com/api/newebpay-callback/",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify/",
-CustomerURL: `https://www.wmesim.com/pending?orderNo=${orderNo}`,
+  CustomerURL: "https://www.wmesim.com/api/newebpay-customer", // ← 新增：接取號資料並寫 Woo
+
 
     ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`,
 
