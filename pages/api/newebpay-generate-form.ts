@@ -126,7 +126,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   /* === Step2: 準備藍新 MPG 參數（動態） === */
-  const needExpire = methods.some((m) => ["VACC", "CVS", "BARCODE"].includes(m));
+  const needExpire = methods.some((m) => ["VACC", "CVS", "BARCODE", "WEBATM"].includes(m));
   const tradeInfoObj: Record<string, string> = {
     MerchantID: MERCHANT_ID,
     RespondType: "JSON",
@@ -137,22 +137,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     ItemDesc: "虛擬商品訂單",
     Email: orderInfo?.email || "test@example.com",
     LoginType: "0",
+
+    // 回傳/通知
     ReturnURL: "https://www.wmesim.com/api/newebpay-callback/",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify/",
-    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`, // ← 保留你原本意圖
+    ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`,
+
     // ✅ 動態付款方式
     PaymentMethod: paymentMethodValue,
     CREDIT: flags.CREDIT,
     VACC: flags.VACC,
     WEBATM: flags.WEBATM,
-    CVS: flags.CVS, // 若白名單不含，會是 "0"
+    CVS: flags.CVS,
     BARCODE: flags.BARCODE,
     LINEPAY: flags.LINEPAY,
+
     ...(needExpire ? { ExpireDate: String(orderInfo?.expireMinutes ?? 1440) } : {}),
   };
-
-  //（上線後可移除）檢查參數，避免誤送 CVS
-  // console.log("[MPG params]", tradeInfoObj);
 
   const tradeInfoStr = new URLSearchParams(tradeInfoObj).toString();
   const encrypted = aesEncrypt(tradeInfoStr, HASH_KEY, HASH_IV);
@@ -168,6 +169,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     </form>
     <script>document.getElementById("newebpay-form").submit();</script>
   `;
-  res.setHeader("Content-Type", "text/html");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 }

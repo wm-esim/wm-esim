@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 
 /** 讓 Newebpay 能送 raw body（必須） */
 export const config = { api: { bodyParser: false } };
-const NOTIFY_VERSION = "v5.3.0";
+const NOTIFY_VERSION = "v5.3.2";
 
 /** ===== 建議改用 .env（此處沿用你現值） ===== */
 const MERCHANT_ID = "MS3788816305";
