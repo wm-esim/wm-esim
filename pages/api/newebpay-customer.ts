@@ -1,4 +1,3 @@
-// /pages/api/newebpay-customer.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import type { IncomingMessage } from "http";
 import crypto from "crypto";
@@ -7,14 +6,16 @@ import axios from "axios";
 
 export const config = { api: { bodyParser: false } };
 
-const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
-const HASH_IV  = "PKetlaZYZcZvlMmC";
+// ====== 金流 & WooCommerce 設定 ======
+const MERCHANT_ID = "MS3788816305";
+const HASH_KEY    = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
+const HASH_IV     = "PKetlaZYZcZvlMmC";
 
 const WC_API_BASE = "https://fegoesim.com/wp-json/wc/v3";
 const WC_CK = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
 const WC_CS = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
-/* ---------------- utils ---------------- */
+// ---------------------- utils ----------------------
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -23,23 +24,25 @@ function readBody(req: IncomingMessage): Promise<string> {
     req.on("error", reject);
   });
 }
+
 function sha(encrypted: string, key: string, iv: string) {
   const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 
-/** 官方：AES-256-CBC + PKCS7，密文為 hex */
-function aes256cbcDecryptHexPkcs7(hex: string, key: string, iv: string): string {
-  const encrypted = Buffer.from(hex.trim(), "hex");
-  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-  decipher.setAutoPadding(false); // 手動去 PKCS7
-  const buf = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  const pad = buf[buf.length - 1];
-  if (pad < 1 || pad > 16) throw new Error(`Invalid PKCS7 padding length: ${pad}`);
-  return buf.slice(0, buf.length - pad).toString("utf8");
+// ✅ 官方規格：TradeInfo 一律為 HEX → UTF8
+function aesDecryptHex(encryptedHex: string, key: string, iv: string): string {
+  const decipher = crypto.createDecipheriv(
+    "aes-256-cbc",
+    Buffer.from(key, "utf8"),
+    Buffer.from(iv, "utf8")
+  );
+  decipher.setAutoPadding(true);
+  let decrypted = decipher.update(encryptedHex, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+  return decrypted;
 }
 
-/** Result 可能是 JSON 或 querystring；且 Result 可能再包一層字串 */
 function parseDecrypted(text: string): any {
   try {
     const obj = JSON.parse(text);
@@ -58,40 +61,11 @@ function parseDecrypted(text: string): any {
   }
 }
 
-/** 只做 URL 層級的「還原」候選（不做 base64 亂試），以便找出能過 SHA 的原字串 */
-function buildTradeInfoCandidates(tiRaw: string): string[] {
-  const out = new Set<string>();
-  const push = (s?: string) => { if (s && s.trim()) out.add(String(s).trim()); };
-
-  const raw = String(tiRaw || "").trim();
-  push(raw);
-
-  // 有 %xx 再 decode 一次（避免過度 decode）
-  if (/%[0-9a-fA-F]{2}/.test(raw)) {
-    try { push(decodeURIComponent(raw)); } catch {}
-  }
-
-  // 處理 + 被轉空白的情形：空白→+，然後再嘗試 decode
-  if (!/%[0-9a-fA-F]{2}/.test(raw) && /\s/.test(raw)) {
-    const restored = raw.replace(/\s+/g, "+");
-    push(restored);
-    try { push(decodeURIComponent(restored)); } catch {}
-  }
-
-  // 特殊：%2B → +
-  const plusFixed = raw.replace(/%2B/gi, "+");
-  if (plusFixed !== raw) {
-    push(plusFixed);
-    try { push(decodeURIComponent(plusFixed)); } catch {}
-  }
-
-  return Array.from(out);
-}
-
 function isOffsitePending(result: any) {
   const t = String(result?.PaymentType || "").toUpperCase();
   return t === "VACC" || t === "CVS" || t === "WEBATM";
 }
+
 function buildOffsiteInfo(result: any) {
   return {
     PaymentType: String(result?.PaymentType || "").toUpperCase(),
@@ -104,6 +78,7 @@ function buildOffsiteInfo(result: any) {
     Amt:         result?.Amt,
   };
 }
+
 async function findWooOrderIdByNewebpayNo(merchantOrderNo: string): Promise<number | null> {
   const resp = await axios.get(`${WC_API_BASE}/orders`, {
     auth: { username: WC_CK, password: WC_CS },
@@ -119,7 +94,7 @@ async function findWooOrderIdByNewebpayNo(merchantOrderNo: string): Promise<numb
   return null;
 }
 
-/* ---------------- handler ---------------- */
+// ---------------------- handler ----------------------
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const rid = Math.random().toString(36).slice(2, 10);
 
@@ -131,11 +106,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const raw = await readBody(req);
 
-    // 先從 query 取保底的 orderNo
-    const queryOrderNo =
-      Array.isArray(req.query.orderNo) ? req.query.orderNo[0] : (req.query.orderNo as string | undefined) || "";
-
-    // 從 raw 抽參數（避免被任何 parser 改掉內容）
+    // 從 raw 擷取參數
     const getRaw = (name: string): string => {
       const i = raw.indexOf(`${name}=`);
       if (i < 0) return "";
@@ -143,72 +114,58 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const e = raw.indexOf("&", s);
       return (e === -1 ? raw.slice(s) : raw.slice(s, e)).trim();
     };
+
     const TI_raw = getRaw("TradeInfo");
     const TS_raw = getRaw("TradeSha");
+    const queryOrderNo =
+      Array.isArray(req.query.orderNo) ? req.query.orderNo[0] : (req.query.orderNo as string | undefined) || "";
 
-    // 只做 URL 邏輯修復的候選，找出能「通過 SHA」的版本
-    const candidates = buildTradeInfoCandidates(TI_raw);
-    let matchedTI = "";
-    for (const cand of candidates) {
-      if (sha(cand, HASH_KEY, HASH_IV) === TS_raw) { matchedTI = cand; break; }
+    // 驗章
+    let TradeInfo = "";
+    let shaOk = false;
+    if (sha(TI_raw, HASH_KEY, HASH_IV) === TS_raw) {
+      TradeInfo = TI_raw;
+      shaOk = true;
     }
-    const shaOk = Boolean(matchedTI);
 
-    // 先準備 orderNo（即便解不開也能對到 Woo）
-    // 有些情況 MerchantOrderNo 也會出現在未加密欄位上（很少見），順手撈一下
-    let orderNo = queryOrderNo
-      || (raw.match(/(?:^|&)MerchantOrderNo=([^&]+)/)?.[1] ? decodeURIComponent(raw.match(/(?:^|&)MerchantOrderNo=([^&]+)/)![1]) : "")
-      || "";
-
-    // 嘗試解密（官方規格：hex + 手動 PKCS7）
+    // 解密
     let result: any = null;
-    let decryptErr: string | null = null;
-    if (shaOk) {
+    let decryptError: string | null = null;
+    if (shaOk && TradeInfo) {
       try {
-        const decrypted = aes256cbcDecryptHexPkcs7(matchedTI, HASH_KEY, HASH_IV);
+        const decrypted = aesDecryptHex(TradeInfo, HASH_KEY, HASH_IV);
         const payload = parseDecrypted(decrypted);
         result = payload?.Result ?? null;
-        if (result?.MerchantOrderNo) orderNo = String(result.MerchantOrderNo) || orderNo;
       } catch (e: any) {
-        decryptErr = e?.message || String(e);
+        decryptError = e?.message || String(e);
       }
     }
 
-    // 沒拿到 orderNo → 無法對 Woo；直接回 /pending（讓前端顯示缺少參數）
+    // orderNo 來源：query 保底 → 解密結果覆蓋
+    let orderNo = queryOrderNo || "";
+    if (result?.MerchantOrderNo) orderNo = String(result.MerchantOrderNo);
+
     if (!orderNo) {
-      console.warn(`[customer:${rid}] missing orderNo, shaOk=${shaOk}, tiLen=${(matchedTI || TI_raw).length}`);
+      console.warn(`[customer:${rid}] missing orderNo`);
       return res.writeHead(302, { Location: `/pending` }).end();
     }
 
-    // 映射 Woo 訂單
     const wooOrderId = await findWooOrderIdByNewebpayNo(orderNo);
     if (!wooOrderId) {
       console.warn(`[customer:${rid}] cannot map Woo order for ${orderNo}`);
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
-    // 若解不開或 sha 不過 → 在正確的訂單上寫 DEBUG，且仍導回 pending?orderNo=...
-    if (!shaOk || !result) {
-      try {
-        await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
-          {
-            note: [
-              `🧪 [DEBUG] Newebpay Customer (reqId=${rid})`,
-              `shaOk=${shaOk}`,
-              `tiLen=${(matchedTI || TI_raw).length}`,
-              decryptErr ? `error=${decryptErr}` : "",
-            ].filter(Boolean).join("\n"),
-            customer_note: false,
-          },
-          { auth: { username: WC_CK, password: WC_CS } }
-        );
-      } catch (e) {
-        console.warn(`[customer:${rid}] write debug note failed: ${(e as any)?.message || e}`);
-      }
+    if (!result) {
+      // 解不開時 → DEBUG 備註
+      await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
+        { note: `🧪 [DEBUG] Newebpay Customer (reqId=${rid})\nshaOk=${shaOk}\ntiLen=${(TradeInfo || TI_raw).length}\nerror=${decryptError || "unknown"}`, customer_note: false },
+        { auth: { username: WC_CK, password: WC_CS } }
+      );
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
-    // 取號成功（ATM/超商/WebATM）→ on-hold + meta + 備註（冪等）
+    // ATM / CVS / WEBATM → on-hold + 備註
     if (isOffsitePending(result)) {
       const offsite = buildOffsiteInfo(result);
 
@@ -223,36 +180,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         ],
       }, { auth: { username: WC_CK, password: WC_CS } });
 
-      // 防重複備註
-      const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
-        auth: { username: WC_CK, password: WC_CS },
-      });
-      const alreadyNoted = (current?.meta_data || []).some((m: any) => m?.key === "newebpay_offsite_note_v1");
+      const lines = [
+        `🔔 藍新金流 取號成功（${offsite.PaymentType}）`,
+        offsite.BankCode ? `銀行代碼：${offsite.BankCode}` : "",
+        (offsite.CodeNo || offsite.PaymentNo) ? `轉帳帳號 / 繳費代碼：${offsite.CodeNo || offsite.PaymentNo}` : "",
+        offsite.StoreType ? `超商別：${offsite.StoreType}` : "",
+        offsite.ExpireDate ? `繳費期限：${offsite.ExpireDate}` : "",
+        offsite.TradeNo ? `交易序號：${offsite.TradeNo}` : "",
+        `商店訂單號：${orderNo}`,
+        "（CustomerURL 寫入）",
+      ].filter(Boolean).join("\n");
 
-      if (!alreadyNoted) {
-        const lines = [
-          `🔔 藍新金流 取號成功（${offsite.PaymentType}）`,
-          offsite.BankCode ? `銀行代碼：${offsite.BankCode}` : "",
-          (offsite.CodeNo || offsite.PaymentNo) ? `轉帳帳號 / 繳費代碼：${offsite.CodeNo || offsite.PaymentNo}` : "",
-          offsite.StoreType ? `超商別：${offsite.StoreType}` : "",
-          offsite.ExpireDate ? `繳費期限：${offsite.ExpireDate}` : "",
-          offsite.TradeNo ? `交易序號：${offsite.TradeNo}` : "",
-          `商店訂單號：${orderNo}`,
-          "（CustomerURL 寫入）",
-        ].filter(Boolean).join("\n");
+      await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
+        { note: lines, customer_note: false },
+        { auth: { username: WC_CK, password: WC_CS } }
+      );
 
-        await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
-          { note: lines, customer_note: false },
-          { auth: { username: WC_CK, password: WC_CS } }
-        );
-        await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`,
-          { meta_data: [{ key: "newebpay_offsite_note_v1", value: "1" }] },
-          { auth: { username: WC_CK, password: WC_CS } }
-        );
-      }
+      return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}` }).end();
     }
 
-    // 無論如何都導回 pending?orderNo=...
+    // 其他情況 → 直接回 pending
     return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}` }).end();
 
   } catch (e: any) {
