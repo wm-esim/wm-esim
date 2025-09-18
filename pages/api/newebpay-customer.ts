@@ -28,7 +28,6 @@ function sha(encrypted: string, key: string, iv: string) {
   const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
-/** 嘗試 hex/base64 兩種可能 */
 function aesDecryptSafe(input: string, key: string, iv: string): string {
   const ti = String(input || "").trim();
   const tryDec = (enc: "hex" | "base64") => {
@@ -58,7 +57,6 @@ function parseDecrypted(text: string): any {
     return r;
   }
 }
-/** ATM/超商/WebATM 皆視為 pending（第一次回傳一定沒 PayTime） */
 function isOffsitePending(result: any) {
   const t = String(result?.PaymentType || "").toUpperCase();
   return t === "VACC" || t === "CVS" || t === "WEBATM";
@@ -92,7 +90,6 @@ async function findWooOrderIdByNewebpayNo(merchantOrderNo: string): Promise<numb
 
 /* ---------------------- handler ---------------------- */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  // 產一個簡短 reqId 方便在 Woo 備註追蹤
   const hint = String(req.headers["x-vercel-id"] || "");
   const rid  = hint ? hint.split("::").pop()! : Math.random().toString(36).slice(2, 10);
 
@@ -104,20 +101,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const raw = await readBody(req);
     const ct  = String(req.headers["content-type"] || "");
-    const safeHeaders = (() => {
-      const pick = ["content-type","x-forwarded-for","x-real-ip","user-agent","x-vercel-id"];
-      const out: Record<string,string> = {};
-      pick.forEach(k => { const v = req.headers[k]; if (v) out[k]=String(v); });
-      return out;
-    })();
 
-    // 後備：從 query 拿 orderNo（務必讓你送藍新時 CustomerURL ?orderNo=...）
     const queryOrderNo = Array.isArray(req.query.orderNo) ? req.query.orderNo[0] : (req.query.orderNo as string | undefined) || "";
 
-    // 解析非加密欄位（只讀，不做信任）
     const bodyParsed: any = ct.includes("application/json") ? JSON.parse(raw || "{}") : qs.parse(raw);
 
-    // 從 raw 直接擷取（避免 + / 空白 / decode 問題）
     const getRaw = (name: string): string => {
       const i = raw.indexOf(`${name}=`);
       if (i < 0) return "";
@@ -128,7 +116,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const TI_raw = getRaw("TradeInfo");
     const TS_raw = getRaw("TradeSha");
 
-    // 產生多個候選值
     const getTIcandidates = (ti: string): string[] => {
       const out: string[] = [];
       const hasPct = /%[0-9a-fA-F]{2}/.test(ti);
@@ -143,14 +130,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     };
     const TI_candidates = getTIcandidates(TI_raw);
 
-    // 比對 SHA
     let TradeInfo = "";
     let shaOk = false;
     for (const cand of TI_candidates) {
       if (sha(cand, HASH_KEY, HASH_IV) === TS_raw) { TradeInfo = cand; shaOk = true; break; }
     }
 
-    // 解密
     let result: any = null;
     let decryptError: string | null = null;
     const tryDecrypt = (ti: string) => {
@@ -178,40 +163,33 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // 以解密的 MerchantOrderNo 覆蓋；否則用 query 的保底值
     let orderNo = queryOrderNo || "";
     if (result?.MerchantOrderNo) orderNo = String(result.MerchantOrderNo);
 
-    // 若兩邊都拿不到，寫一筆警告並跳 pending（讓前端顯示「缺少 orderNo」）
     if (!orderNo) {
-      console.warn(`[customer:${rid}] missing orderNo. ct=${ct}, shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}`);
+      console.warn(`[customer:${rid}] missing orderNo`);
       return res.writeHead(302, { Location: `/pending` }).end();
     }
 
-    // 映射 Woo 訂單
     const wooOrderId = await findWooOrderIdByNewebpayNo(orderNo);
     if (!wooOrderId) {
       console.warn(`[customer:${rid}] cannot map Woo order for ${orderNo}`);
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
-    // 若解不開，先記一筆 DEBUG 備註，方便你在 Woo 端看到發生了什麼
     if (!result) {
       try {
         await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
-          { note: `🧪 [DEBUG] Newebpay Customer (reqId=${rid})\nshaOk=${shaOk}\ntiLen=${(TradeInfo || TI_raw).length}\ndecryptError=${decryptError || "unknown"}`, customer_note: false },
+          { note: `🧪 [DEBUG] Newebpay Customer (reqId=${rid})\nshaOk=${shaOk}\ndecryptError=${decryptError || "unknown"}`, customer_note: false },
           { auth: { username: WC_CK, password: WC_CS } }
         );
       } catch {}
-      // 不中斷流程，仍然導回 pending 頁面，等 Notify 真入帳或使用者重整
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
-    // 有 result：ATM/超商/WebATM 取號 → on-hold + meta + 備註（冪等）
     if (isOffsitePending(result)) {
       const offsite = buildOffsiteInfo(result);
 
-      // 先更新 meta 與狀態
       await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
         status: "on-hold",
         meta_data: [
@@ -223,7 +201,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         ],
       }, { auth: { username: WC_CK, password: WC_CS } });
 
-      // 防重複備註
       const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
         auth: { username: WC_CK, password: WC_CS },
       });
@@ -254,7 +231,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}` }).end();
     }
 
-    // 其他型別（例如信用卡已付），一律導回 pending
     return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}` }).end();
 
   } catch (e: any) {
