@@ -27,27 +27,28 @@ function sha(encrypted: string, key: string, iv: string) {
   const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
-/** callback 固定 hex 解 */
-function aesDecryptHexFirst(encryptedHex: string, key: string, iv: string): string {
-  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-  decipher.setAutoPadding(true);
-  let out = decipher.update(encryptedHex, "hex", "utf8");
-  out += decipher.final("utf8");
-  return out;
+
+/** 官方文檔：AES-256-CBC + PKCS7 → Hex */
+function aes256cbcDecryptHexPkcs7(hex: string, key: string, iv: string): string {
+  const encrypted = Buffer.from(hex.trim(), "hex");
+
+  const decipher = crypto.createDecipheriv(
+    "aes-256-cbc",
+    Buffer.from(key, "utf8"),
+    Buffer.from(iv, "utf8")
+  );
+  // 關閉自動 padding，自行剝 PKCS7
+  decipher.setAutoPadding(false);
+
+  const decryptedBuf = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  const pad = decryptedBuf[decryptedBuf.length - 1];
+  if (pad < 1 || pad > 16) throw new Error(`Invalid PKCS7 padding length: ${pad}`);
+  const data = decryptedBuf.slice(0, decryptedBuf.length - pad);
+
+  return data.toString("utf8");
 }
-/** 自動判斷 hex/base64 */
-function aesDecryptSafe(input: string, key: string, iv: string): string {
-  const ti = String(input || "").trim();
-  const tryDec = (enc: "hex" | "base64") => {
-    const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-    decipher.setAutoPadding(true);
-    let out = decipher.update(ti, enc, "utf8");
-    out += decipher.final("utf8");
-    return out;
-  };
-  if (/^[0-9a-fA-F]+$/.test(ti)) { try { return tryDec("hex"); } catch { return tryDec("base64"); } }
-  else                           { try { return tryDec("base64"); } catch { return tryDec("hex"); } }
-}
+
+/** 官方 Result 格式：可能是 JSON 或 querystring，且 Result 可能再包一層字串 */
 function parseDecrypted(text: string): any {
   try {
     const obj = JSON.parse(text);
@@ -65,6 +66,7 @@ function parseDecrypted(text: string): any {
     return r;
   }
 }
+
 function isOffsitePending(result: any) {
   const t = String(result?.PaymentType || "").toUpperCase();
   return t === "VACC" || t === "CVS" || t === "WEBATM";
@@ -119,66 +121,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const TI_raw = getRaw("TradeInfo");
     const TS_raw = getRaw("TradeSha");
 
-    // 候選組合
-    const getTIcandidates = (ti: string): string[] => {
-      const out: string[] = [];
-      const hasPct = /%[0-9a-fA-F]{2}/.test(ti);
-      out.push(ti);
-      if (hasPct) { try { out.push(decodeURIComponent(ti)); } catch {} }
-      if (!hasPct && /\s/.test(ti)) {
-        const restored = ti.replace(/\s/g, "+");
-        out.push(restored);
-        try { out.push(decodeURIComponent(restored)); } catch {}
+    // 先檢查 SHA
+    let result: any = null;
+    if (TI_raw && sha(TI_raw, HASH_KEY, HASH_IV) === TS_raw) {
+      try {
+        const decrypted = aes256cbcDecryptHexPkcs7(TI_raw, HASH_KEY, HASH_IV);
+        const payload = parseDecrypted(decrypted);
+        result = payload?.Result ?? null;
+      } catch (e: any) {
+        await axios.post(`${WC_API_BASE}/orders`, {
+          note: `🧪 [DEBUG] Newebpay Customer (reqId=${rid})\nshaOk=true\nTI_len=${TI_raw.length}\nerror=${e.message}`,
+          customer_note: false,
+        }, { auth: { username: WC_CK, password: WC_CS } });
       }
-      return Array.from(new Set(out.filter(Boolean)));
-    };
-    const TI_candidates = getTIcandidates(TI_raw);
-
-    // SHA 驗證
-    let TradeInfo = "";
-    let shaOk = false;
-    for (const cand of TI_candidates) {
-      if (sha(cand, HASH_KEY, HASH_IV) === TS_raw) { TradeInfo = cand; shaOk = true; break; }
     }
 
-    // 解密流程
-    let result: any = null;
-    let decryptError: string | null = null;
-
-    const tryDecryptAny = (cands: string[]) => {
-      for (const ti of cands) {
-        // 1) 固定 hex
-        if (/^[0-9a-fA-F]+$/.test(ti)) {
-          try {
-            const text = aesDecryptHexFirst(ti, HASH_KEY, HASH_IV);
-            const obj  = parseDecrypted(text);
-            if (obj?.Result) return obj.Result;
-          } catch (e: any) { decryptError = e.message; }
-        }
-        // 2) base64
-        try {
-          const b64 = ti.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
-          const padded = b64 + "===".slice((b64.length + 3) % 4);
-          const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(HASH_KEY, "utf8"), Buffer.from(HASH_IV, "utf8"));
-          decipher.setAutoPadding(true);
-          let out = decipher.update(padded, "base64", "utf8");
-          out += decipher.final("utf8");
-          const obj = parseDecrypted(out);
-          if (obj?.Result) return obj.Result;
-        } catch (e: any) { decryptError = e.message; }
-        // 3) safe
-        try {
-          const text = aesDecryptSafe(ti, HASH_KEY, HASH_IV);
-          const obj  = parseDecrypted(text);
-          if (obj?.Result) return obj.Result;
-        } catch (e: any) { decryptError = e.message; }
-      }
-      return null;
-    };
-
-    if (shaOk && TradeInfo) result = tryDecryptAny([TradeInfo]);
-    if (!result) result = tryDecryptAny(TI_candidates);
-
+    // orderNo：先用 query 備援
     let orderNo = queryOrderNo || "";
     if (result?.MerchantOrderNo) orderNo = String(result.MerchantOrderNo);
 
@@ -195,14 +153,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!result) {
       await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
-        { note: `🧪 [DEBUG2] Newebpay Customer (reqId=${rid})\nshaOk=${shaOk}\ndecryptError=${decryptError || "unknown"}`, customer_note: false },
+        { note: `🧪 [DEBUG] Newebpay Customer (reqId=${rid})\nshaOk=false 或解密失敗`, customer_note: false },
         { auth: { username: WC_CK, password: WC_CS } }
       );
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
+    // ATM/超商/WebATM → on-hold + 備註
     if (isOffsitePending(result)) {
       const offsite = buildOffsiteInfo(result);
+
       await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
         status: "on-hold",
         meta_data: [
