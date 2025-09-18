@@ -56,6 +56,19 @@ function buildFlags(methods: string[]) {
   return flags;
 }
 
+/** yyyymmdd / hhmmss */
+function formatExpire(ts: number) {
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const HH = pad(d.getHours());
+  const MM = pad(d.getMinutes());
+  const SS = pad(d.getSeconds());
+  return { ExpireDate: `${yyyy}${mm}${dd}`, ExpireTime: `${HH}${MM}${SS}` };
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
@@ -72,7 +85,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   /* === 付款方式決策 ===
      1) 店家白名單（環境變數設定你後台真正有開的方式）
         例：NEWEBPAY_ALLOWED_METHODS="CREDIT,VACC,WEBATM"
-        （不含 CVS，就不會送 CVS）
      2) 前端本次需求（orderInfo.method / orderInfo.methods）
      最終 = 白名單 ∩ 本次需求；若本次沒指定，採用白名單。若交集為空，退回 ["CREDIT"]。
   */
@@ -126,34 +138,44 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   /* === Step2: 準備藍新 MPG 參數（動態） === */
-  const needExpire = methods.some((m) => ["VACC", "CVS", "BARCODE", "WEBATM"].includes(m));
+  // 非即時付款（會取號）的方式：VACC / CVS / BARCODE（WEBATM 不是取號）
+  const needExpire = methods.some((m) => ["VACC", "CVS", "BARCODE"].includes(m));
+  const expireMinutes = Number(orderInfo?.expireMinutes ?? 1440);
+  const { ExpireDate, ExpireTime } = needExpire
+    ? formatExpire(Date.now() + Math.max(1, expireMinutes) * 60 * 1000)
+    : { ExpireDate: undefined, ExpireTime: undefined };
+
   const tradeInfoObj: Record<string, string> = {
     MerchantID: MERCHANT_ID,
     RespondType: "JSON",
     TimeStamp: `${Math.floor(Date.now() / 1000)}`,
-    Version: "2.0",
+    Version: "2.3", // ← 對齊新版規格
     MerchantOrderNo: orderNo,
     Amt: String(amount),
     ItemDesc: "虛擬商品訂單",
     Email: orderInfo?.email || "test@example.com",
-    LoginType: "0",
 
     // 回傳/通知
     ReturnURL: "https://www.wmesim.com/api/newebpay-callback/",
     NotifyURL: "https://www.wmesim.com/api/newebpay-notify/",
+CustomerURL: `https://www.wmesim.com/pending?orderNo=${orderNo}`,
+
     ClientBackURL: `https://www.wmesim.com/thank-you?orderNo=${orderNo}`,
 
-    // ✅ 動態付款方式
-    PaymentMethod: paymentMethodValue,
+    // ✅ 動態付款方式旗標
+    PaymentMethod: paymentMethodValue, // 非必填，保留
     CREDIT: flags.CREDIT,
     VACC: flags.VACC,
     WEBATM: flags.WEBATM,
     CVS: flags.CVS,
     BARCODE: flags.BARCODE,
     LINEPAY: flags.LINEPAY,
-
-    ...(needExpire ? { ExpireDate: String(orderInfo?.expireMinutes ?? 1440) } : {}),
   };
+
+  if (needExpire && ExpireDate && ExpireTime) {
+    (tradeInfoObj as any).ExpireDate = ExpireDate; // YYYYMMDD
+    (tradeInfoObj as any).ExpireTime = ExpireTime; // hhmmss
+  }
 
   const tradeInfoStr = new URLSearchParams(tradeInfoObj).toString();
   const encrypted = aesEncrypt(tradeInfoStr, HASH_KEY, HASH_IV);
@@ -165,7 +187,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       <input type="hidden" name="MerchantID" value="${MERCHANT_ID}" />
       <input type="hidden" name="TradeInfo" value="${encrypted}" />
       <input type="hidden" name="TradeSha" value="${tradeSha}" />
-      <input type="hidden" name="Version" value="2.0" />
+      <input type="hidden" name="Version" value="2.3" />
     </form>
     <script>document.getElementById("newebpay-form").submit();</script>
   `;
