@@ -130,7 +130,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const raw = await readBody(req);
-
+console.log("📦 Raw Newebpay body:", raw);  
     // 抽 raw 參數
     const getRaw = (name: string): string => {
       const i = raw.indexOf(`${name}=`);
