@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 
 /** 讓 Newebpay 能送 raw body（必須） */
 export const config = { api: { bodyParser: false } };
-const NOTIFY_VERSION = "v6.0.0";
+const NOTIFY_VERSION = "v6.1.0";
 
 /** ===== 建議改用 .env（此處沿用你現值） ===== */
 const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
@@ -549,12 +549,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     /* B) 已付款（信用卡或 ATM 真入帳）→ processing + 付款 meta + eSIM + 發票（冪等） */
     else if (isPaid(result, Status)) {
       console.log(`[notify:${rid}] paid branch`);
+
+      // 先抓目前訂單與 meta
       const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
         auth: { username: WC_CK, password: WC_CS },
       });
-      const alreadyPaid = (current?.meta_data || []).some((m: any) => m?.key === "newebpay_pay_time");
+      const meta = current?.meta_data || [];
+      const hasMeta  = (k: string) => meta.some((m: any) => m?.key === k);
+      const alreadyPaidMeta  = hasMeta("newebpay_pay_time");
+      const alreadyPaidNote  = hasMeta("newebpay_paid_note_v1");
+      const hasEsim   = hasMeta("esim_qrcodes") || hasMeta("esim_qrcode");
+      const hasInvoice= hasMeta("invoice_number");
 
-      if (!alreadyPaid) {
+      // 補齊付款 meta 與狀態（缺才寫）
+      if (!alreadyPaidMeta) {
         await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
           status: "processing",
           meta_data: [
@@ -563,22 +571,41 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             { key: "newebpay_payment_type", value: payType },
           ],
         }, { auth: { username: WC_CK, password: WC_CS } });
+      } else {
+        // 若已入帳但狀態仍非 processing（例如 on-hold），幫忙糾正
+        if (String(current?.status) === "on_hold" || String(current?.status) === "pending") {
+          await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`,
+            { status: "processing" },
+            { auth: { username: WC_CK, password: WC_CS } }
+          );
+        }
+      }
 
-        const { data: fullOrder } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
-          auth: { username: WC_CK, password: WC_CS },
-        });
+      // 再抓一次最新，避免 meta 舊
+      const { data: fullOrder } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+        auth: { username: WC_CK, password: WC_CS },
+      });
 
+      // ⭐ 關鍵冪等：只要 eSIM 或 發票還沒生成，就執行 fulfill
+      if (!hasEsim || !hasInvoice) {
         await fulfillPaidOrder({
           wooBase: WC_API_BASE, ck: WC_CK, cs: WC_CS,
           orderId: wooOrderId, fullOrder, orderNumber: merchantOrderNo, result, reqId: rid,
         });
+      } else {
+        console.log(`[notify:${rid}] eSIM & invoice already present, skip fulfill.`);
+      }
 
+      // 付款完成備註（冪等）
+      if (!alreadyPaidNote) {
         await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
           { note: `✅ 藍新金流已入帳（${payType}）\n交易序號：${result?.TradeNo || ""}\n入帳時間：${firstPayMoment(result)}`, customer_note: false },
           { auth: { username: WC_CK, password: WC_CS } }
         );
-      } else {
-        console.log(`[notify:${rid}] already paid, skip.`);
+        await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`,
+          { meta_data: [{ key: "newebpay_paid_note_v1", value: "1" }] },
+          { auth: { username: WC_CK, password: WC_CS } }
+        );
       }
     }
 
