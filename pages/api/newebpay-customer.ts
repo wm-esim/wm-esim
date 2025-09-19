@@ -28,37 +28,49 @@ function sha(encrypted: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 
-/** AES-256-CBC，OpenSSL 自動剝 PKCS#7（跟你 callback 同一招） */
-function decryptHexAuto(hex: string, key: string, iv: string): string {
-  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-  decipher.setAutoPadding(true);
-  let out = decipher.update(hex, "hex", "utf8");
-  out += decipher.final("utf8");
-  return out;
-}
-/** AES-256-CBC，手動 PKCS#7（關閉 autoPadding） */
-function decryptHexManual(hex: string, key: string, iv: string): string {
-  const buf = Buffer.from(hex, "hex");
-  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-  decipher.setAutoPadding(false);
-  const out = Buffer.concat([decipher.update(buf), decipher.final()]);
-  const pad = out[out.length - 1];
-  if (pad < 1 || pad > 16) throw new Error(`Invalid PKCS7 padding length: ${pad}`);
-  return out.slice(0, out.length - pad).toString("utf8");
-}
-/** 嚴格順序：hex(auto) → hex(manual) → base64(auto) */
-function decryptStrict(encrypted: string, key: string, iv: string): { plaintext: string, mode: string } {
-  const ti = String(encrypted || "").trim();
+/** 先嘗試 HEX -> autoPadding；失敗則 HEX -> autoPadding=false，並用「剪尾」方式取 JSON/QS 主體 */
+function decryptHexLenient(encryptedHex: string, key: string, iv: string): { plaintext: string; mode: string } {
+  // 1) 嘗試正常（auto padding）
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+    decipher.setAutoPadding(true);
+    let out = decipher.update(encryptedHex, "hex", "utf8");
+    out += decipher.final("utf8");
+    return { plaintext: out, mode: "hex-auto" };
+  } catch {}
 
-  // 1) HEX（先用 auto，失敗再 manual）
-  if (/^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0) {
-    try { return { plaintext: decryptHexAuto(ti, key, iv), mode: "hex-auto" }; } catch {}
-    try { return { plaintext: decryptHexManual(ti, key, iv), mode: "hex-manual" }; } catch {}
+  // 2) 寬鬆：autoPadding=false 取原始 bytes，再自行剪尾
+  const buf = Buffer.from(encryptedHex, "hex");
+  const decipher2 = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  decipher2.setAutoPadding(false);
+  const raw = Buffer.concat([decipher2.update(buf), decipher2.final()]);
+  // 嘗試以 JSON 範圍剪裁：從第一個 { 到最後一個 }
+  const txt = raw.toString("utf8");
+  const l = txt.indexOf("{");
+  const r = txt.lastIndexOf("}");
+  if (l !== -1 && r !== -1 && r > l) {
+    const core = txt.slice(l, r + 1);
+    return { plaintext: core, mode: "hex-lenient-json" };
+  }
+  // 改用 querystring 偵測（例如 Status=...&Message=...）
+  const eqAmpLooksLikeQS = txt.includes("=") && txt.includes("&");
+  if (eqAmpLooksLikeQS) {
+    // 只取到最後一個完整 key=value 的 '&' 之前
+    const lastAmp = txt.lastIndexOf("&");
+    const maybeQS = lastAmp > 0 ? txt.slice(0, lastAmp) : txt;
+    return { plaintext: maybeQS, mode: "hex-lenient-qs" };
   }
 
-  // 2) BASE64（含空白→+、base64url -_/ → +/，補齊 =）
-  const norm = ti.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
+  // 若仍無法鎖定主體，最後仍回傳整段（方便你觀察日志）
+  return { plaintext: txt, mode: "hex-lenient-raw" };
+}
+
+/** 如果不是純 HEX，再容錯一次 base64（含空白→+、-_/ → +/，補齊 =），同樣用 lenient 剪尾 */
+function decryptBase64Lenient(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } {
+  const norm = encrypted.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
   const padded = norm + "===".slice((norm.length + 3) % 4);
+
+  // 1) 先試 auto padding
   try {
     const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
     decipher.setAutoPadding(true);
@@ -67,7 +79,29 @@ function decryptStrict(encrypted: string, key: string, iv: string): { plaintext:
     return { plaintext: out, mode: "base64-auto" };
   } catch {}
 
-  throw new Error("Unsupported TradeInfo encoding after SHA pass");
+  // 2) 寬鬆剪尾
+  const buf = Buffer.from(padded, "base64");
+  const decipher2 = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  decipher2.setAutoPadding(false);
+  const raw = Buffer.concat([decipher2.update(buf), decipher2.final()]);
+  const txt = raw.toString("utf8");
+  const l = txt.indexOf("{");
+  const r = txt.lastIndexOf("}");
+  if (l !== -1 && r !== -1 && r > l) {
+    return { plaintext: txt.slice(l, r + 1), mode: "base64-lenient-json" };
+  }
+  const lastAmp = txt.lastIndexOf("&");
+  if (txt.includes("=") && txt.includes("&")) {
+    return { plaintext: lastAmp > 0 ? txt.slice(0, lastAmp) : txt, mode: "base64-lenient-qs" };
+  }
+  return { plaintext: txt, mode: "base64-lenient-raw" };
+}
+
+function smartDecrypt(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } {
+  const ti = String(encrypted || "").trim();
+  const isHex = /^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0;
+  if (isHex) return decryptHexLenient(ti, key, iv);
+  return decryptBase64Lenient(ti, key, iv);
 }
 
 function parseDecrypted(text: string): any {
@@ -130,8 +164,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const raw = await readBody(req);
-console.log("📦 Raw Newebpay body:", raw);  
-    // 抽 raw 參數
+    // （你剛剛用的）可開關 log：console.log("[customer] 📦 Raw Newebpay body:", raw);
+
+    // 抽 raw 參數（避免 parser 變動內容）
     const getRaw = (name: string): string => {
       const i = raw.indexOf(`${name}=`);
       if (i < 0) return "";
@@ -151,11 +186,11 @@ console.log("📦 Raw Newebpay body:", raw);
 
     // 解密（shaOk 才進）
     let result: any = null;
-    let decryptError: string | null = null;
     let decodeMode = "";
+    let decryptError: string | null = null;
     if (shaOk) {
       try {
-        const { plaintext, mode } = decryptStrict(TI_raw, HASH_KEY, HASH_IV);
+        const { plaintext, mode } = smartDecrypt(TI_raw, HASH_KEY, HASH_IV);
         decodeMode = mode;
         const payload = parseDecrypted(plaintext);
         result = payload?.Result ?? null;
@@ -167,18 +202,18 @@ console.log("📦 Raw Newebpay body:", raw);
 
     // 拿不到 orderNo → 回 /pending（顯示缺少參數）
     if (!orderNo) {
-      console.warn(`[customer:${rid}] missing orderNo, shaOk=${shaOk}, tiLen=${TI_raw.length}`);
+      console.warn(`[customer:${rid}] missing orderNo, shaOk=${shaOk}, tiLen=${(TI_raw || "").length}`);
       return res.writeHead(302, { Location: `/pending` }).end();
     }
 
-    // 對 Woo 訂單
+    // 映射 Woo 訂單
     const wooOrderId = await findWooOrderIdByNewebpayNo(orderNo);
     if (!wooOrderId) {
       console.warn(`[customer:${rid}] cannot map Woo order for ${orderNo}`);
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
-    // 解不開或 sha 不過 → 寫 DEBUG 後導回 pending?orderNo=
+    // 解不開或 sha 不過 → 在訂單備註留 DEBUG 後導回 pending
     if (!shaOk || !result) {
       try {
         await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
@@ -186,7 +221,7 @@ console.log("📦 Raw Newebpay body:", raw);
             note: [
               `🧪 [DEBUG] Newebpay Customer (reqId=${rid})`,
               `shaOk=${shaOk}`,
-              `tiLen=${TI_raw.length}`,
+              `tiLen=${(TI_raw || "").length}`,
               decodeMode ? `decodeMode=${decodeMode}` : "",
               decryptError ? `error=${decryptError}` : "",
             ].filter(Boolean).join("\n"),
@@ -194,13 +229,11 @@ console.log("📦 Raw Newebpay body:", raw);
           },
           { auth: { username: WC_CK, password: WC_CS } }
         );
-      } catch (e) {
-        console.warn(`[customer:${rid}] write debug note failed: ${(e as any)?.message || e}`);
-      }
+      } catch {}
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
-    // 取號成功 → on-hold + meta + 備註（冪等）
+    // 取號成功（ATM/超商/WebATM）→ on-hold + meta + 備註（冪等）
     if (isOffsitePending(result)) {
       const offsite = buildOffsiteInfo(result);
 
@@ -222,21 +255,28 @@ console.log("📦 Raw Newebpay body:", raw);
       const alreadyNoted = (current?.meta_data || []).some((m: any) => m?.key === "newebpay_offsite_note_v1");
 
       if (!alreadyNoted) {
-        const lines = [
-          `🔔 藍新金流 取號成功（${offsite.PaymentType}）`,
-          offsite.BankCode ? `銀行代碼：${offsite.BankCode}` : "",
-          (offsite.CodeNo || offsite.PaymentNo) ? `轉帳帳號 / 繳費代碼：${offsite.CodeNo || offsite.PaymentNo}` : "",
-          offsite.StoreType ? `超商別：${offsite.StoreType}` : "",
-          offsite.ExpireDate ? `繳費期限：${offsite.ExpireDate}` : "",
-          offsite.TradeNo ? `交易序號：${offsite.TradeNo}` : "",
-          `商店訂單號：${orderNo}`,
-          "（CustomerURL 寫入）",
-        ].filter(Boolean).join("\n");
+        // 建備註內容（這裡已經是字串）
+const lines =
+  [
+    `🔔 藍新金流 取號成功（${offsite.PaymentType}）`,
+    offsite.BankCode ? `銀行代碼：${offsite.BankCode}` : "",
+    (offsite.CodeNo || offsite.PaymentNo) ? `轉帳帳號 / 繳費代碼：${offsite.CodeNo || offsite.PaymentNo}` : "",
+    offsite.StoreType ? `超商別：${offsite.StoreType}` : "",
+    offsite.ExpireDate ? `繳費期限：${offsite.ExpireDate}` : "",
+    offsite.TradeNo ? `交易序號：${offsite.TradeNo}` : "",
+    `商店訂單號：${orderNo}`,
+    "（CustomerURL 寫入）",
+  ]
+  .filter(Boolean)
+  .join("\n");
 
-        await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
-          { note: lines, customer_note: false },
-          { auth: { username: WC_CK, password: WC_CS } }
-        );
+// 這裡要改成 note: lines（不要再 .join）
+await axios.post(
+  `${WC_API_BASE}/orders/${wooOrderId}/notes`,
+  { note: lines, customer_note: false },
+  { auth: { username: WC_CK, password: WC_CS } }
+);
+
         await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`,
           { meta_data: [{ key: "newebpay_offsite_note_v1", value: "1" }] },
           { auth: { username: WC_CK, password: WC_CS } }
