@@ -4,11 +4,9 @@ import type { IncomingMessage } from "http";
 import crypto from "crypto";
 import qs from "qs";
 
-/** 建議改 .env；此處沿用你的現值 */
 const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
 const HASH_IV  = "PKetlaZYZcZvlMmC";
 
-/** ========== helpers ========== */
 export const config = { api: { bodyParser: false } };
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -25,7 +23,6 @@ function sha(encrypted: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 
-/** 先試 hex；失敗再試 base64（會做 +/空白 正規化） */
 function decryptTradeInfo(ti: string, key: string, iv: string): string {
   const tryHex = () => {
     const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
@@ -44,11 +41,9 @@ function decryptTradeInfo(ti: string, key: string, iv: string): string {
     return out;
   };
 
-  // 明顯是 hex（只含 0-9a-f 且長度為偶數）先走 hex
   if (/^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0) {
     try { return tryHex(); } catch { return tryB64(); }
   }
-  // 否則先試 base64，再回退 hex
   try { return tryB64(); } catch { return tryHex(); }
 }
 
@@ -87,18 +82,14 @@ function isOffsitePending(result: any) {
   return (t === "VACC" || t === "CVS" || t === "WEBATM") && !hasPayMoment(result);
 }
 
-/** ========== handler ========== */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") {
-    // 使用者直接打開此網址 → 帶不到資訊時，就回感謝頁
-    return res.redirect(302, `/thank-you`);
+    return res.redirect(302, `/thank-you?status=error`);
   }
 
   try {
     const raw = await readBody(req);
     const ct  = String(req.headers["content-type"] || "");
-
-    // 只為了讀取非加密欄位可解析，但 TI/TS 儘量從 raw 取，避免 + 被還原成空白
     const body: any = ct.includes("application/json") ? JSON.parse(raw || "{}") : qs.parse(raw);
 
     const getRawParam = (name: string): string | undefined => {
@@ -109,7 +100,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return (amp === -1 ? raw.slice(s) : raw.slice(s, amp)).trim();
     };
 
-    // 優先 raw，其次 body
     const TI_raw = getRawParam("TradeInfo") || String(body?.TradeInfo || "");
     const TS_raw = getRawParam("TradeSha")  || String(body?.TradeSha  || "");
 
@@ -117,7 +107,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.redirect(302, `/thank-you?status=error`);
     }
 
-    // 為了避免上游多/少 decode，產生候選值並找出 SHA 能過的一個
     const tiCandidates = (() => {
       const out: string[] = [];
       const hasPct = /%[0-9a-fA-F]{2}/.test(TI_raw);
@@ -139,7 +128,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.redirect(302, `/thank-you?status=error`);
     }
 
-    // 解密 + 解析
     let payload: any = {};
     try {
       const plain = decryptTradeInfo(TradeInfo, HASH_KEY, HASH_IV);
@@ -148,20 +136,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.redirect(302, `/thank-you?status=error`);
     }
 
-    const status  = payload?.Status as string | undefined; // SUCCESS / ...
+    const status  = payload?.Status as string | undefined;
     const result  = payload?.Result || {};
-    const orderNo = result?.MerchantOrderNo || "";
+    const orderNo =
+      result?.MerchantOrderNo || result?.MerchantOrderID || body?.MerchantOrderNo || "";
 
     if (!orderNo) {
       return res.redirect(302, `/thank-you?status=error`);
     }
 
-    // 只決定導向狀態；**不**做任何後端 fulfill（避免和 notify 重覆）
     let nextStatus = "fail";
-    if (isPaid(result, status))       nextStatus = "success";
+    if (isPaid(result, status)) nextStatus = "success";
     else if (isOffsitePending(result)) nextStatus = "pending";
 
-    // 也把已知欄位（付款方式/時間/交易序號）帶回前端可用（非必要）
     const qsExtra = new URLSearchParams({
       orderNo,
       status: nextStatus,
