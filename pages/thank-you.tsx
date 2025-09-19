@@ -1,28 +1,27 @@
 // ✅ ThankYouPage.tsx
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import { useCart } from "@/components/context/CartContext";
 
+/* ---------- 型別 ---------- */
 interface QrcodeInfo {
   name: string;
   src: string;
 }
-
 interface OrderInfo {
-  status: string | null; // 我們在 /api/fetch-order 會回 SUCCESS / PENDING / FAILED ...
+  status: string | null; // 後端 /api/fetch-order 回傳的狀態（SUCCESS / PENDING / FAILED ...）
   message?: string | null;
   MerchantOrderNo?: string;
-  PaymentType?: string; // e.g. CREDIT / VACC / CVS ...
+  PaymentType?: string; // CREDIT / VACC / CVS ...
   PayTime?: string;
   TradeNo?: string;
 }
-
 interface OffsiteInfo {
   PaymentType?: string; // VACC / CVS / WEBATM ...
   BankCode?: string; // ATM 銀行代碼
-  CodeNo?: string; // ATM 虛擬帳號 或 通用代號欄位
+  CodeNo?: string; // ATM 虛擬帳號 或通用代號欄位
   PaymentNo?: string; // CVS 代碼
   StoreType?: string; // 超商別
   ExpireDate?: string; // 繳費期限
@@ -30,6 +29,7 @@ interface OffsiteInfo {
   Amt?: number | string;
 }
 
+/* ---------- 元件 ---------- */
 export default function ThankYouPage() {
   const [orderInfo, setOrderInfo] = useState<OrderInfo | null>(null);
   const [offsiteInfo, setOffsiteInfo] = useState<OffsiteInfo | null>(null);
@@ -38,17 +38,34 @@ export default function ThankYouPage() {
 
   const { clearCart } = useCart();
 
-  // 從 URL 取出 orderNo（只算一次）
-  const orderNo = useMemo(() => {
-    if (typeof window === "undefined") return null;
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get("orderNo");
+  // 只取一次：優先 URL ?orderNo=，否則用 localStorage('lastOrderNo')
+  const orderNo = useMemo<string>(() => {
+    if (typeof window === "undefined") return "";
+    const p = new URLSearchParams(window.location.search);
+    const fromUrl = p.get("orderNo") || "";
+    if (fromUrl) {
+      try {
+        localStorage.setItem("lastOrderNo", fromUrl);
+      } catch {}
+      return fromUrl;
+    }
+    try {
+      return localStorage.getItem("lastOrderNo") || "";
+    } catch {
+      return "";
+    }
   }, []);
 
-  // 防止在同一次瀏覽或重複 render 時「重複清空」
+  const pendingHref = useMemo(
+    () =>
+      orderNo ? `/pending?orderNo=${encodeURIComponent(orderNo)}` : "/account",
+    [orderNo]
+  );
+
+  // 僅清一次購物車
   const clearedOnceRef = useRef(false);
 
-  // 成功判斷：後端回來的狀態只要代表「已付款」
+  // 是否已付款（各種字樣都視為 true）
   const isPaid = (status?: string | null) => {
     if (!status) return false;
     const s = String(status).toLowerCase();
@@ -60,7 +77,7 @@ export default function ThankYouPage() {
     );
   };
 
-  // 文字複製
+  // 複製小工具
   const copyText = async (text?: string) => {
     if (!text) return;
     try {
@@ -81,45 +98,84 @@ export default function ThankYouPage() {
     }
   };
 
-  useEffect(() => {
-    if (!orderNo) {
-      setLoading(false);
-      return;
-    }
+  // 取單（供初次+輪詢共用）
+  const fetchOrderOnce = useCallback(async () => {
+    if (!orderNo) return { ok: false };
+    try {
+      const res = await axios.get("/api/fetch-order", { params: { orderNo } });
+      const { qrcodes, orderInfo, offsiteInfo } = res.data ?? {};
+      setOrderInfo(orderInfo || null);
+      setOffsiteInfo(offsiteInfo || null);
+      setQrcodes(Array.isArray(qrcodes) ? qrcodes : []);
 
-    const fetchOrder = async () => {
-      try {
-        const res = await axios.get("/api/fetch-order", {
-          params: { orderNo },
-        });
-        const { qrcodes, orderInfo, offsiteInfo } = res.data ?? {};
-
-        setOrderInfo(orderInfo || null);
-        setOffsiteInfo(offsiteInfo || null);
-        setQrcodes(Array.isArray(qrcodes) ? qrcodes : []);
-
-        // ✅ 僅在「確定付款成功」且未清空過時執行 clearCart
-        if (!clearedOnceRef.current && isPaid(orderInfo?.status)) {
-          clearedOnceRef.current = true;
-          clearCart();
-        }
-      } catch (err) {
-        console.error("❌ 抓取訂單資料失敗", err);
-      } finally {
-        setLoading(false);
+      // 確定付款成功 → 清空購物車（僅一次）
+      if (!clearedOnceRef.current && isPaid(orderInfo?.status)) {
+        clearedOnceRef.current = true;
+        clearCart();
       }
-    };
-
-    fetchOrder();
+      return {
+        ok: true,
+        paid: isPaid(orderInfo?.status),
+        hasQR: Array.isArray(qrcodes) && qrcodes.length > 0,
+      };
+    } catch (err) {
+      console.error("❌ 抓取訂單資料失敗", err);
+      return { ok: false };
+    }
   }, [orderNo, clearCart]);
 
-  // 是否顯示匯款/代碼資訊卡：未付款 + 有資料
+  // 輪詢：每 5 秒拉一次，最長 90 秒；條件達成（付清且有 QR）就停止
+  const triesRef = useRef(0);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const maxTries = 18; // 18 * 5s = 90 秒
+
+  const startPolling = useCallback(() => {
+    if (timerRef.current || !orderNo) return;
+    timerRef.current = setInterval(async () => {
+      triesRef.current += 1;
+      const r = await fetchOrderOnce();
+      if ((r.paid && r.hasQR) || triesRef.current >= maxTries) {
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+      }
+    }, 5000);
+  }, [orderNo, fetchOrderOnce]);
+
+  // 初始化：先查一次，再開始輪詢
+  useEffect(() => {
+    (async () => {
+      if (!orderNo) {
+        setLoading(false);
+        return;
+      }
+      await fetchOrderOnce();
+      setLoading(false);
+      startPolling();
+    })();
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [orderNo, fetchOrderOnce, startPolling]);
+
+  // 是否顯示匯款/代碼資訊卡：未付款 + 有 offsite 資料
   const showOffsiteCard =
     !!offsiteInfo && !!orderInfo && !isPaid(orderInfo.status);
 
+  /* ---------- UI ---------- */
   return (
     <div className="max-w-2xl mx-auto px-4 py-20">
       <h1 className="text-2xl font-bold mb-4">感謝您的訂購</h1>
+
+      {!orderNo && (
+        <div className="bg-red-50 border border-red-100 rounded p-4 mb-6 text-red-700">
+          找不到訂單編號。請返回「我的帳戶 &gt; QR Code 訂單」查詢。
+        </div>
+      )}
 
       {/* 訂單摘要 */}
       {orderInfo ? (
@@ -236,30 +292,60 @@ export default function ThankYouPage() {
         </div>
       )}
 
-      {/* QR Codes（已付款才通常會有，依你的後端邏輯而定） */}
-      <div className="mt-10">
+      {/* QR Codes 區塊 */}
+      <div className="mt-10 space-y-4">
         {loading && <p>正在載入 QRCode...</p>}
 
+        {/* 已付款但尚未產生 QR → 提示等待（不顯示錯誤） */}
+        {!loading && isPaid(orderInfo?.status) && qrcodes.length === 0 && (
+          <div className="bg-blue-50 border border-blue-100 rounded p-4 text-blue-800">
+            付款完成，正在產生 eSIM 與發票，請稍候…（系統會自動更新）
+            <div className="mt-3 flex gap-2">
+              <a
+                href={pendingHref}
+                className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm"
+              >
+                前往訂單追蹤
+              </a>
+              <button
+                onClick={() => location.reload()}
+                className="px-3 py-1.5 rounded border text-sm"
+              >
+                重新整理
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 有 QRCode → 顯示 */}
         {!loading && qrcodes.length > 0 && (
           <div className="space-y-6">
-            <h2 className="text-xl font-bold mb-2">
-              請掃描下方 QRCode 啟用 eSIM
-            </h2>
-            {qrcodes.map((qrcode, index) => (
-              <div key={index} className="text-center">
-                <p className="font-semibold mb-2">{qrcode.name}</p>
+            <h2 className="text-xl font-bold">請掃描下方 QRCode 啟用 eSIM</h2>
+            {qrcodes.map((q, i) => (
+              <div key={i} className="text-center">
+                <p className="font-semibold mb-2">{q.name}</p>
                 <img
-                  src={qrcode.src}
-                  alt={`eSIM QRCode ${index + 1}`}
+                  src={q.src}
+                  alt={`eSIM QRCode ${i + 1}`}
                   className="w-64 h-64 mx-auto"
                 />
               </div>
             ))}
+            <p className="text-sm text-gray-600">
+              我們也已將 QRCode 寄到您的信箱；若未收到，請檢查垃圾郵件匣。
+            </p>
           </div>
         )}
 
-        {!loading && qrcodes.length === 0 && (
-          <p className="text-red-500">無法取得 QRCode，請聯繫客服</p>
+        {/* 超時仍無 QR（未必錯誤，給出指引） */}
+        {!loading && qrcodes.length === 0 && !isPaid(orderInfo?.status) && (
+          <div className="text-gray-700">
+            目前尚未取得 QRCode。若您剛完成付款，請稍候片刻或
+            <a href={pendingHref} className="underline ml-1">
+              前往訂單追蹤
+            </a>{" "}
+            查看。
+          </div>
         )}
       </div>
     </div>
