@@ -21,17 +21,22 @@ const formatNTDNoDecimals = (val) => {
   return rounded.toLocaleString("zh-TW");
 };
 
-/** 狀態中文 */
-const statusLabel = (status) =>
-  ({
+/** 狀態中文（同時支援 on-hold / on_hold） */
+const statusLabel = (status) => {
+  const s = String(status || "")
+    .toLowerCase()
+    .replace("_", "-");
+  const map = {
     processing: "已付款完成",
     pending: "待付款",
     completed: "已完成",
     cancelled: "已取消",
-    on_hold: "待付款",
+    "on-hold": "待付款",
     refunded: "已退款",
     failed: "付款失敗",
-  }[status] || status);
+  };
+  return map[s] || status;
+};
 
 /** 支援多張 QRCode（esim_qrcodes）或單張（esim_qrcode + 數量） */
 function readQRCodes(meta, namePrefix = "eSIM") {
@@ -75,13 +80,21 @@ function readQRCodes(meta, namePrefix = "eSIM") {
   return results;
 }
 
-/* ====== 讀取非即時付款資訊（VACC/CVS/WEBATM） ====== */
+/* ====== 匯款資訊 helpers ====== */
 const OFFSITE_TYPES = new Set(["VACC", "CVS", "WEBATM"]);
+
+const pickMeta = (meta, key) => {
+  if (!Array.isArray(meta)) return undefined;
+  const hit = meta.find((m) => m?.key === key);
+  return hit?.value != null ? String(hit.value) : undefined;
+};
+
+/** 讀取非即時付款資訊（從 meta 與 offsite JSON 整合） */
 function readOffsiteInfo(order) {
   const meta = order?.meta_data || [];
-  const getMeta = (k) => meta.find((m) => m?.key === k)?.value;
+  const getMeta = (k) => pickMeta(meta, k);
 
-  // 優先：newebpay_offsite_info（JSON）
+  // 優先使用 newebpay_offsite_info（JSON 字串）
   let info = null;
   const rawInfo = getMeta("newebpay_offsite_info");
   if (rawInfo) {
@@ -90,41 +103,45 @@ function readOffsiteInfo(order) {
     } catch {}
   }
 
-  // 次之：個別欄位
-  const paymentType = (
+  // 付款方式
+  const paymentType = String(
     info?.PaymentType ||
-    getMeta("newebpay_payment_type") ||
-    order?.paymentType ||
-    order?.payment_method_title ||
-    ""
-  )
-    .toString()
-    .toUpperCase();
+      getMeta("newebpay_payment_type") ||
+      order?.paymentType ||
+      order?.payment_method_title ||
+      ""
+  ).toUpperCase();
 
-  const bank = info?.BankCode || getMeta("newebpay_bank_code") || "";
+  // 欄位整合
+  const bankCode = info?.BankCode || getMeta("newebpay_bank_code") || "";
   const codeNo =
     info?.CodeNo || info?.PaymentNo || getMeta("newebpay_code_no") || "";
-  const expire = info?.ExpireDate || getMeta("newebpay_expire_date") || "";
+  const expireDate = info?.ExpireDate || getMeta("newebpay_expire_date") || "";
   const tradeNo = info?.TradeNo || "";
+  const amount = info?.Amt ?? order?.total;
 
-  // 是否已付款（看 meta 是否有 pay_time）
+  // 是否已付款（看 meta 是否有 pay_time，或狀態 processing/completed）
   const paidTime = getMeta("newebpay_pay_time");
-  const isPaid =
-    Boolean(paidTime) || ["processing", "completed"].includes(order?.status);
+  const st = String(order?.status || "")
+    .toLowerCase()
+    .replace("_", "-");
+  const isPaid = Boolean(paidTime) || st === "processing" || st === "completed";
+
+  // 顯示條件：非即時付款 && 未入帳 && 狀態 pending/on-hold
+  const show =
+    OFFSITE_TYPES.has(paymentType) &&
+    !isPaid &&
+    (st === "pending" || st === "on-hold");
 
   return {
     paymentType,
-    bankCode: bank,
+    bankCode,
     codeNo,
-    expireDate: expire,
+    expireDate,
     tradeNo,
-    amount: order?.total,
+    amount,
     isPaid,
-    // 此訂單是否「尚未入帳」且為非即時付款類型
-    show:
-      OFFSITE_TYPES.has(paymentType) &&
-      !isPaid &&
-      ["on_hold", "pending"].includes(order?.status),
+    show,
   };
 }
 
@@ -178,11 +195,7 @@ const AccountPage = () => {
     log(
       "get-orders 回傳筆數：",
       list.length,
-      list.map((o) => ({
-        id: o.id,
-        status: o.status,
-        total: o.total,
-      }))
+      list.map((o) => ({ id: o.id, status: o.status, total: o.total }))
     );
     return list;
   }, []);
@@ -236,10 +249,7 @@ const AccountPage = () => {
           localStorage.setItem("user", JSON.stringify(user));
           log("users/me 成功，user.id =", user?.id, "email =", user?.email);
         } catch (e) {
-          warn(
-            "users/me 失敗（常見 403 JWT 無效），改用 localStorage user。err =",
-            e?.message
-          );
+          warn("users/me 失敗，改用 localStorage user。err =", e?.message);
         }
       }
 
@@ -253,9 +263,7 @@ const AccountPage = () => {
       setEditingEmail(user.email || "");
       setEditingPhone(user.meta?.billing_phone || "");
       setEditingName(user.name || "");
-
-      // 初次載入就把訂單抓好（避免切到分頁才抓）
-      await loadOrders(user);
+      await loadOrders(user); // 初次載入就抓訂單
     };
 
     load().catch((e) => {
@@ -318,13 +326,24 @@ const AccountPage = () => {
     }
   };
 
-  /* ===== 匯款資訊：UI & 邏輯 ===== */
+  /* ===== 匯款資訊：UI & 邏輯（純 JS） ===== */
   const copy = async (text) => {
     try {
       await navigator.clipboard.writeText(String(text || ""));
       alert("已複製到剪貼簿");
     } catch (e) {
-      warn("無法複製（瀏覽器權限受限）", e?.message);
+      // 瀏覽器權限受限時的 fallback
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = String(text || "");
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        alert("已複製到剪貼簿");
+      } catch (err) {
+        warn("無法複製（瀏覽器權限受限）");
+      }
     }
   };
 
@@ -332,11 +351,12 @@ const AccountPage = () => {
     if (userInfo) await loadOrders(userInfo);
   };
 
-  if (!userInfo)
+  if (!userInfo) {
     return <p className="mt-40 text-center">正在載入會員資料...</p>;
+  }
 
   // 依現有訂單，挑出需要顯示匯款資訊的
-  const remitOrders = (orders || [])
+  const remitOrders = (Array.isArray(orders) ? orders : [])
     .map((o) => ({ order: o, remit: readOffsiteInfo(o) }))
     .filter((x) => x.remit.show);
 
@@ -640,118 +660,117 @@ const AccountPage = () => {
                         <OrderSkeletonGrid count={4} />
                       ) : remitOrders.length === 0 ? (
                         <p className="text-gray-600">
-                          目前沒有待匯款 / 待繳費的訂單。
-                          若您剛完成付款，請點上方「重新整理」更新狀態。
+                          目前沒有待匯款 /
+                          待繳費的訂單。若您剛完成付款，請點上方「重新整理」更新狀態。
                         </p>
                       ) : (
                         <ul className="space-y-4">
-                          {remitOrders.map(({ order, remit }) => (
-                            <li key={order.id} className="border rounded p-4">
-                              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-                                <div>
-                                  <p className="text-sm text-gray-500">
-                                    訂單編號 #{order.id}
-                                  </p>
-                                  <p className="font-semibold">
-                                    付款方式：{remit.paymentType}
-                                  </p>
-                                </div>
-                                <div className="text-sm text-gray-600">
-                                  金額：NT$
-                                  <span className="font-semibold">
-                                    {formatNTDNoDecimals(order.total)}
-                                  </span>
-                                </div>
-                              </div>
+                          {remitOrders.map(({ order, remit }) => {
+                            const meta = order.meta_data || [];
+                            const npNo =
+                              meta.find((m) => m?.key === "newebpay_order_no")
+                                ?.value ||
+                              order.number ||
+                              order.id;
 
-                              <div className="grid sm:grid-cols-2 gap-3 text-sm mt-3">
-                                {remit.bankCode && (
-                                  <div className="bg-gray-50 rounded p-3">
-                                    <p className="text-gray-500">銀行代碼</p>
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-semibold">
-                                        {remit.bankCode}
-                                      </span>
-                                      <button
-                                        onClick={() => copy(remit.bankCode)}
-                                        className="px-2 py-0.5 text-xs rounded bg-gray-200 hover:bg-gray-300"
-                                      >
-                                        複製
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                                {remit.codeNo && (
-                                  <div className="bg-gray-50 rounded p-3">
-                                    <p className="text-gray-500">
-                                      {remit.paymentType === "VACC"
-                                        ? "轉帳帳號"
-                                        : "繳費代碼"}
+                            return (
+                              <li key={order.id} className="border rounded p-4">
+                                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                                  <div>
+                                    <p className="text-sm text-gray-500">
+                                      商店訂單號 {npNo}
                                     </p>
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-semibold break-all">
-                                        {remit.codeNo}
-                                      </span>
-                                      <button
-                                        onClick={() => copy(remit.codeNo)}
-                                        className="px-2 py-0.5 text-xs rounded bg-gray-200 hover:bg-gray-300"
-                                      >
-                                        複製
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                                {remit.expireDate && (
-                                  <div className="bg-gray-50 rounded p-3">
-                                    <p className="text-gray-500">繳費期限</p>
                                     <p className="font-semibold">
-                                      {remit.expireDate}
+                                      付款方式：{remit.paymentType}
                                     </p>
                                   </div>
-                                )}
-                                {remit.tradeNo && (
-                                  <div className="bg-gray-50 rounded p-3">
-                                    <p className="text-gray-500">交易序號</p>
-                                    <p className="font-semibold">
-                                      {remit.tradeNo}
-                                    </p>
+                                  <div className="text-sm text-gray-600">
+                                    金額：NT$
+                                    <span className="font-semibold">
+                                      {formatNTDNoDecimals(remit.amount)}
+                                    </span>
                                   </div>
-                                )}
-                              </div>
+                                </div>
 
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                {/* 前往 pending 頁面（以商店訂單號 newebpay_order_no 為主；若沒有就用 Woo id） */}
-                                {(() => {
-                                  const meta = order.meta_data || [];
-                                  const npNo = meta.find(
-                                    (m) => m?.key === "newebpay_order_no"
-                                  )?.value;
-                                  const orderNo = npNo || String(order.id);
-                                  return (
-                                    <Link
-                                      href={`/pending?orderNo=${encodeURIComponent(
-                                        orderNo
-                                      )}`}
-                                      className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm"
-                                    >
-                                      前往訂單追蹤
-                                    </Link>
-                                  );
-                                })()}
-                                <button
-                                  onClick={refreshOrders}
-                                  className="px-3 py-1.5 rounded border text-sm"
-                                >
-                                  我已完成付款，重新整理狀態
-                                </button>
-                              </div>
+                                <div className="grid sm:grid-cols-2 gap-3 text-sm mt-3">
+                                  {remit.bankCode ? (
+                                    <div className="bg-gray-50 rounded p-3">
+                                      <p className="text-gray-500">銀行代碼</p>
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-semibold">
+                                          {remit.bankCode}
+                                        </span>
+                                        <button
+                                          onClick={() => copy(remit.bankCode)}
+                                          className="px-2 py-0.5 text-xs rounded bg-gray-200 hover:bg-gray-300"
+                                        >
+                                          複製
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {remit.codeNo ? (
+                                    <div className="bg-gray-50 rounded p-3">
+                                      <p className="text-gray-500">
+                                        {remit.paymentType === "VACC"
+                                          ? "轉帳帳號"
+                                          : "繳費代碼"}
+                                      </p>
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-semibold break-all">
+                                          {remit.codeNo}
+                                        </span>
+                                        <button
+                                          onClick={() => copy(remit.codeNo)}
+                                          className="px-2 py-0.5 text-xs rounded bg-gray-200 hover:bg-gray-300"
+                                        >
+                                          複製
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {remit.expireDate ? (
+                                    <div className="bg-gray-50 rounded p-3">
+                                      <p className="text-gray-500">繳費期限</p>
+                                      <p className="font-semibold">
+                                        {remit.expireDate}
+                                      </p>
+                                    </div>
+                                  ) : null}
+                                  {remit.tradeNo ? (
+                                    <div className="bg-gray-50 rounded p-3">
+                                      <p className="text-gray-500">交易序號</p>
+                                      <p className="font-semibold">
+                                        {remit.tradeNo}
+                                      </p>
+                                    </div>
+                                  ) : null}
+                                </div>
 
-                              <p className="text-xs text-gray-500 mt-3">
-                                ＊完成轉帳或繳費後，系統會自動更新訂單狀態（通常數分鐘內）。
-                                若長時間未更新，請聯繫客服並提供訂單編號與付款憑證。
-                              </p>
-                            </li>
-                          ))}
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <Link
+                                    href={`/pending?orderNo=${encodeURIComponent(
+                                      npNo
+                                    )}`}
+                                    className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm"
+                                  >
+                                    前往訂單追蹤
+                                  </Link>
+                                  <button
+                                    onClick={refreshOrders}
+                                    className="px-3 py-1.5 rounded border text-sm"
+                                  >
+                                    我已完成付款，重新整理狀態
+                                  </button>
+                                </div>
+
+                                <p className="text-xs text-gray-500 mt-3">
+                                  ＊完成轉帳或繳費後，系統會自動更新訂單狀態（通常數分鐘內）。
+                                  若長時間未更新，請聯繫客服並提供訂單編號與付款憑證。
+                                </p>
+                              </li>
+                            );
+                          })}
                         </ul>
                       )}
                     </motion.div>
