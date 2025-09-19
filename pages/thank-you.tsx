@@ -1,4 +1,4 @@
-// ✅ ThankYouPage.tsx（移除 localStorage fallback 版本）
+// ✅ ThankYouPage.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
@@ -11,20 +11,20 @@ interface QrcodeInfo {
   src: string;
 }
 interface OrderInfo {
-  status: string | null;
+  status: string | null; // 後端 /api/fetch-order 回傳的狀態（SUCCESS / PENDING / FAILED ...）
   message?: string | null;
   MerchantOrderNo?: string;
-  PaymentType?: string;
+  PaymentType?: string; // CREDIT / VACC / CVS ...
   PayTime?: string;
   TradeNo?: string;
 }
 interface OffsiteInfo {
-  PaymentType?: string;
-  BankCode?: string;
-  CodeNo?: string;
-  PaymentNo?: string;
-  StoreType?: string;
-  ExpireDate?: string;
+  PaymentType?: string; // VACC / CVS / WEBATM ...
+  BankCode?: string; // ATM 銀行代碼
+  CodeNo?: string; // ATM 虛擬帳號 或通用代號欄位
+  PaymentNo?: string; // CVS 代碼
+  StoreType?: string; // 超商別
+  ExpireDate?: string; // 繳費期限
   TradeNo?: string;
   Amt?: number | string;
 }
@@ -38,11 +38,22 @@ export default function ThankYouPage() {
 
   const { clearCart } = useCart();
 
-  // ✅ 只接受 URL 上的 orderNo；沒有就視為找不到
+  // 只取一次：優先 URL ?orderNo=，否則用 localStorage('lastOrderNo')
   const orderNo = useMemo<string>(() => {
     if (typeof window === "undefined") return "";
     const p = new URLSearchParams(window.location.search);
-    return p.get("orderNo") || "";
+    const fromUrl = p.get("orderNo") || "";
+    if (fromUrl) {
+      try {
+        localStorage.setItem("lastOrderNo", fromUrl);
+      } catch {}
+      return fromUrl;
+    }
+    try {
+      return localStorage.getItem("lastOrderNo") || "";
+    } catch {
+      return "";
+    }
   }, []);
 
   const pendingHref = useMemo(
@@ -54,6 +65,7 @@ export default function ThankYouPage() {
   // 僅清一次購物車
   const clearedOnceRef = useRef(false);
 
+  // 是否已付款（各種字樣都視為 true）
   const isPaid = (status?: string | null) => {
     if (!status) return false;
     const s = String(status).toLowerCase();
@@ -65,12 +77,14 @@ export default function ThankYouPage() {
     );
   };
 
+  // 複製小工具
   const copyText = async (text?: string) => {
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
       alert("已複製到剪貼簿");
     } catch {
+      // iOS Safari 等瀏覽器 fallback
       const ta = document.createElement("textarea");
       ta.value = text;
       document.body.appendChild(ta);
@@ -84,17 +98,17 @@ export default function ThankYouPage() {
     }
   };
 
-  // 抓單（供初次 + 輪詢共用）
+  // 取單（供初次+輪詢共用）
   const fetchOrderOnce = useCallback(async () => {
     if (!orderNo) return { ok: false };
     try {
       const res = await axios.get("/api/fetch-order", { params: { orderNo } });
       const { qrcodes, orderInfo, offsiteInfo } = res.data ?? {};
-
       setOrderInfo(orderInfo || null);
       setOffsiteInfo(offsiteInfo || null);
       setQrcodes(Array.isArray(qrcodes) ? qrcodes : []);
 
+      // 確定付款成功 → 清空購物車（僅一次）
       if (!clearedOnceRef.current && isPaid(orderInfo?.status)) {
         clearedOnceRef.current = true;
         clearCart();
@@ -110,10 +124,10 @@ export default function ThankYouPage() {
     }
   }, [orderNo, clearCart]);
 
-  // 輪詢：每 5 秒，最長 90 秒；付清且拿到 QR 即停
+  // 輪詢：每 5 秒拉一次，最長 90 秒；條件達成（付清且有 QR）就停止
   const triesRef = useRef(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const maxTries = 18;
+  const maxTries = 18; // 18 * 5s = 90 秒
 
   const startPolling = useCallback(() => {
     if (timerRef.current || !orderNo) return;
@@ -129,6 +143,7 @@ export default function ThankYouPage() {
     }, 5000);
   }, [orderNo, fetchOrderOnce]);
 
+  // 初始化：先查一次，再開始輪詢
   useEffect(() => {
     (async () => {
       if (!orderNo) {
@@ -147,6 +162,7 @@ export default function ThankYouPage() {
     };
   }, [orderNo, fetchOrderOnce, startPolling]);
 
+  // 是否顯示匯款/代碼資訊卡：未付款 + 有 offsite 資料
   const showOffsiteCard =
     !!offsiteInfo && !!orderInfo && !isPaid(orderInfo.status);
 
@@ -185,6 +201,7 @@ export default function ThankYouPage() {
             匯款 / 代碼繳費資訊
           </h3>
 
+          {/* ATM 匯款（VACC / WEBATM） */}
           {(offsiteInfo?.PaymentType === "VACC" ||
             offsiteInfo?.PaymentType === "WEBATM") && (
             <div className="space-y-2">
@@ -220,6 +237,7 @@ export default function ThankYouPage() {
             </div>
           )}
 
+          {/* 超商代碼（CVS） */}
           {offsiteInfo?.PaymentType === "CVS" && (
             <div className="space-y-2">
               <p>超商別：{offsiteInfo.StoreType || "—"}</p>
@@ -245,6 +263,7 @@ export default function ThankYouPage() {
             </div>
           )}
 
+          {/* 其它待繳型式（保險） */}
           {!["VACC", "WEBATM", "CVS"].includes(
             String(offsiteInfo?.PaymentType || "")
           ) && (
@@ -277,6 +296,7 @@ export default function ThankYouPage() {
       <div className="mt-10 space-y-4">
         {loading && <p>正在載入 QRCode...</p>}
 
+        {/* 已付款但尚未產生 QR → 提示等待（不顯示錯誤） */}
         {!loading && isPaid(orderInfo?.status) && qrcodes.length === 0 && (
           <div className="bg-blue-50 border border-blue-100 rounded p-4 text-blue-800">
             付款完成，正在產生 eSIM 與發票，請稍候…（系統會自動更新）
@@ -297,6 +317,7 @@ export default function ThankYouPage() {
           </div>
         )}
 
+        {/* 有 QRCode → 顯示 */}
         {!loading && qrcodes.length > 0 && (
           <div className="space-y-6">
             <h2 className="text-xl font-bold">請掃描下方 QRCode 啟用 eSIM</h2>
@@ -316,6 +337,7 @@ export default function ThankYouPage() {
           </div>
         )}
 
+        {/* 超時仍無 QR（未必錯誤，給出指引） */}
         {!loading && qrcodes.length === 0 && !isPaid(orderInfo?.status) && (
           <div className="text-gray-700">
             目前尚未取得 QRCode。若您剛完成付款，請稍候片刻或
