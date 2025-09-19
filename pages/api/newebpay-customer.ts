@@ -28,47 +28,44 @@ function sha(encrypted: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 
-/** AES-256-CBC + 手動 PKCS7 去 padding（輸入：Buffer 密文） */
-function aes256cbcDecryptRawPkcs7(encBuf: Buffer, key: string, iv: string): string {
-  const decipher = crypto.createDecipheriv(
-    "aes-256-cbc",
-    Buffer.from(key, "utf8"),
-    Buffer.from(iv, "utf8")
-  );
+/** AES-256-CBC，OpenSSL 自動剝 PKCS#7（跟你 callback 同一招） */
+function decryptHexAuto(hex: string, key: string, iv: string): string {
+  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  decipher.setAutoPadding(true);
+  let out = decipher.update(hex, "hex", "utf8");
+  out += decipher.final("utf8");
+  return out;
+}
+/** AES-256-CBC，手動 PKCS#7（關閉 autoPadding） */
+function decryptHexManual(hex: string, key: string, iv: string): string {
+  const buf = Buffer.from(hex, "hex");
+  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
   decipher.setAutoPadding(false);
-  const out = Buffer.concat([decipher.update(encBuf), decipher.final()]);
+  const out = Buffer.concat([decipher.update(buf), decipher.final()]);
   const pad = out[out.length - 1];
   if (pad < 1 || pad > 16) throw new Error(`Invalid PKCS7 padding length: ${pad}`);
   return out.slice(0, out.length - pad).toString("utf8");
 }
-
-/** 嘗試依序解密：HEX → BASE64（含 base64url 容錯） */
-function decryptTradeInfoStrict(encrypted: string, key: string, iv: string): { plaintext: string, mode: "hex"|"base64" } {
+/** 嚴格順序：hex(auto) → hex(manual) → base64(auto) */
+function decryptStrict(encrypted: string, key: string, iv: string): { plaintext: string, mode: string } {
   const ti = String(encrypted || "").trim();
 
-  // 1) HEX（官方宣稱的標準）
+  // 1) HEX（先用 auto，失敗再 manual）
   if (/^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0) {
-    try {
-      const buf = Buffer.from(ti, "hex");
-      const plain = aes256cbcDecryptRawPkcs7(buf, key, iv);
-      return { plaintext: plain, mode: "hex" };
-    } catch (e) {
-      // 繼續嘗試 base64
-    }
+    try { return { plaintext: decryptHexAuto(ti, key, iv), mode: "hex-auto" }; } catch {}
+    try { return { plaintext: decryptHexManual(ti, key, iv), mode: "hex-manual" }; } catch {}
   }
 
-  // 2) BASE64（含空白->+、base64url -_/ → +/）
+  // 2) BASE64（含空白→+、base64url -_/ → +/，補齊 =）
   const norm = ti.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
   const padded = norm + "===".slice((norm.length + 3) % 4);
   try {
-    const buf = Buffer.from(padded, "base64");
-    if (buf.length > 0) {
-      const plain = aes256cbcDecryptRawPkcs7(buf, key, iv);
-      return { plaintext: plain, mode: "base64" };
-    }
-  } catch (e) {
-    // 仍失敗，往外丟
-  }
+    const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+    decipher.setAutoPadding(true);
+    let out = decipher.update(padded, "base64", "utf8");
+    out += decipher.final("utf8");
+    return { plaintext: out, mode: "base64-auto" };
+  } catch {}
 
   throw new Error("Unsupported TradeInfo encoding after SHA pass");
 }
@@ -134,7 +131,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const raw = await readBody(req);
 
-    // 從 raw 擷取參數（避免被 parser 動到內容）
+    // 抽 raw 參數
     const getRaw = (name: string): string => {
       const i = raw.indexOf(`${name}=`);
       if (i < 0) return "";
@@ -149,16 +146,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     let orderNo =
       (Array.isArray(req.query.orderNo) ? req.query.orderNo[0] : (req.query.orderNo as string | undefined)) || "";
 
-    // 先驗章（以目前收到的 TradeInfo 原文驗）
+    // 先驗章（用 TI_raw 原文）
     const shaOk = TI_raw && sha(TI_raw, HASH_KEY, HASH_IV) === TS_raw;
 
-    // 解密（只在 shaOk 時才做）
+    // 解密（shaOk 才進）
     let result: any = null;
     let decryptError: string | null = null;
-    let decodeMode: "hex" | "base64" | "" = "";
+    let decodeMode = "";
     if (shaOk) {
       try {
-        const { plaintext, mode } = decryptTradeInfoStrict(TI_raw, HASH_KEY, HASH_IV);
+        const { plaintext, mode } = decryptStrict(TI_raw, HASH_KEY, HASH_IV);
         decodeMode = mode;
         const payload = parseDecrypted(plaintext);
         result = payload?.Result ?? null;
@@ -168,20 +165,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // 沒拿到 orderNo → 直接回 /pending（讓前端顯示缺少參數）
+    // 拿不到 orderNo → 回 /pending（顯示缺少參數）
     if (!orderNo) {
       console.warn(`[customer:${rid}] missing orderNo, shaOk=${shaOk}, tiLen=${TI_raw.length}`);
       return res.writeHead(302, { Location: `/pending` }).end();
     }
 
-    // 對應 Woo 訂單
+    // 對 Woo 訂單
     const wooOrderId = await findWooOrderIdByNewebpayNo(orderNo);
     if (!wooOrderId) {
       console.warn(`[customer:${rid}] cannot map Woo order for ${orderNo}`);
       return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}&refresh=1` }).end();
     }
 
-    // 解不開 or sha 不過 → 在正確訂單上留下 DEBUG
+    // 解不開或 sha 不過 → 寫 DEBUG 後導回 pending?orderNo=
     if (!shaOk || !result) {
       try {
         await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
@@ -247,7 +244,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // 一律導回 pending?orderNo=...
+    // 一律帶 orderNo 導回
     return res.writeHead(302, { Location: `/pending?orderNo=${encodeURIComponent(orderNo)}` }).end();
 
   } catch (e: any) {
