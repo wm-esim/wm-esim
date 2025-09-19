@@ -44,19 +44,64 @@ function sha(encrypted: string, key: string, iv: string) {
   const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
-/** 嘗試 hex → base64 → 反之；都失敗則 throw */
-function aesDecryptSafe(input: string, key: string, iv: string): string {
-  const ti = String(input || "").trim();
-  const tryDec = (enc: "hex" | "base64") => {
-    const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-    decipher.setAutoPadding(true);
-    let out = decipher.update(ti, enc, "utf8");
-    out += decipher.final("utf8");
-    return out;
-  };
-  if (/^[0-9a-fA-F]+$/.test(ti)) { try { return tryDec("hex"); } catch { return tryDec("base64"); } }
-  else                           { try { return tryDec("base64"); } catch { return tryDec("hex"); } }
+
+/* ====== 寬鬆解密（Hex/Base64 自動判斷，處理 +/空白、URL-safe、padding） ====== */
+function decryptHexLenient(encryptedHex: string, key: string, iv: string): { plaintext: string; mode: string } {
+  try {
+    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+    d.setAutoPadding(true);
+    let out = d.update(encryptedHex, "hex", "utf8"); out += d.final("utf8");
+    return { plaintext: out, mode: "hex-auto" };
+  } catch {}
+
+  const buf = Buffer.from(encryptedHex, "hex");
+  const d2  = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  d2.setAutoPadding(false);
+  const raw = Buffer.concat([d2.update(buf), d2.final()]);
+  const txt = raw.toString("utf8");
+
+  const l = txt.indexOf("{"); const r = txt.lastIndexOf("}");
+  if (l !== -1 && r !== -1 && r > l) return { plaintext: txt.slice(l, r + 1), mode: "hex-lenient-json" };
+
+  if (txt.includes("=") && txt.includes("&")) {
+    const lastAmp = txt.lastIndexOf("&");
+    return { plaintext: lastAmp > 0 ? txt.slice(0, lastAmp) : txt, mode: "hex-lenient-qs" };
+  }
+  return { plaintext: txt, mode: "hex-lenient-raw" };
 }
+function decryptBase64Lenient(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } {
+  const norm   = encrypted.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = norm + "===".slice((norm.length + 3) % 4);
+  try {
+    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+    d.setAutoPadding(true);
+    let out = d.update(padded, "base64", "utf8"); out += d.final("utf8");
+    return { plaintext: out, mode: "base64-auto" };
+  } catch {}
+
+  const buf = Buffer.from(padded, "base64");
+  const d2  = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  d2.setAutoPadding(false);
+  const raw = Buffer.concat([d2.update(buf), d2.final()]);
+  const txt = raw.toString("utf8");
+
+  const l = txt.indexOf("{"); const r = txt.lastIndexOf("}");
+  if (l !== -1 && r !== -1 && r > l) return { plaintext: txt.slice(l, r + 1), mode: "base64-lenient-json" };
+
+  if (txt.includes("=") && txt.includes("&")) {
+    const lastAmp = txt.lastIndexOf("&");
+    return { plaintext: lastAmp > 0 ? txt.slice(0, lastAmp) : txt, mode: "base64-lenient-qs" };
+  }
+  return { plaintext: txt, mode: "base64-lenient-raw" };
+}
+function smartDecrypt(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } | null {
+  const ti = String(encrypted || "").trim();
+  const isHex = /^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0;
+  if (isHex)  { try { return decryptHexLenient(ti, key, iv); }   catch {} }
+  else        { try { return decryptBase64Lenient(ti, key, iv); } catch {} }
+  return null;
+}
+
 function parseDecrypted(text: string): any {
   try {
     const obj = JSON.parse(text);
@@ -74,6 +119,7 @@ function parseDecrypted(text: string): any {
     return r;
   }
 }
+
 function hasPayMoment(result: any) {
   return !!(result?.PayTime || result?.PaymentTime || result?.PayDate || result?.CloseTime);
 }
@@ -83,8 +129,8 @@ function firstPayMoment(result: any) {
 function isPaid(result: any, status?: string) {
   const t = String(result?.PaymentType || "").toUpperCase();
   const paid = hasPayMoment(result);
-  if (t === "CREDIT") return status === "SUCCESS";
-  return paid;
+  if (t === "CREDIT") return status === "SUCCESS"; // 信用卡看 Status
+  return paid;                                     // 其它看是否有入帳時間
 }
 function isOffsitePending(result: any) {
   const t = String(result?.PaymentType || "").toUpperCase();
@@ -147,23 +193,16 @@ function encryptAES(data: any, key: string, iv: string) {
   return encrypted;
 }
 
-/** 把「已付款後續」抽成共用：產 eSIM + 開發票（冪等 + 去重） */
+/** 把「已付款後續」抽成共用：產 eSIM + 開發票（冪等） */
 async function fulfillPaidOrder(params: {
   wooBase: string; ck: string; cs: string; orderId: number; fullOrder: any;
   orderNumber: string; result: any; reqId: string;
 }) {
   const { wooBase, ck, cs, orderId, fullOrder, orderNumber, result, reqId } = params;
 
-  // 🔒 如已完成，直接跳出（雙保險）
-  const doneMeta = (fullOrder?.meta_data || []).find((m: any) => m?.key === "esim_done_v1")?.value;
-  if (doneMeta) {
-    console.log(`[notify:${reqId}] esim_done_v1 exists (${doneMeta}), skip fulfill.`);
-    return;
-  }
-
-  // 3.2 產 eSIM（若尚未產生）
+  // ---- eSIM（若尚未產生） ----
   const alreadyHasEsim = (fullOrder?.meta_data || []).some((m: any) => m?.key === "esim_qrcodes");
-  const qrcodesRaw: { name: string; src: string }[] = [];
+  const qrcodes: { name: string; src: string }[] = [];
   const allImagesHtml: string[] = [];
 
   if (!alreadyHasEsim) {
@@ -184,22 +223,15 @@ async function fulfillPaidOrder(params: {
 
       list.forEach((raw: string, i: number) => {
         const src = raw.startsWith("http") ? raw : `data:image/png;base64,${raw}`;
-        qrcodesRaw.push({ name: `${li.name} #${i + 1}`, src });
+        qrcodes.push({ name: `${li.name} #${i + 1}`, src });
       });
 
       allImagesHtml.push(`<div><strong>${li.name}</strong><br/>${imagesHtml}</div>`);
       await axios.post(`${wooBase}/orders/${orderId}/notes`,
-        { note: `<strong>eSIM QRCode（${li.name}）:</strong><br />${imagesHtml}`, customer_note: true },
+        { note: `<strong>eSIM QRCode (${li.name}):</strong><br />${imagesHtml}`, customer_note: true },
         { auth: { username: ck, password: cs } }
       );
     }
-
-    // ✅ 以 src 去重
-    const dedupMap = new Map<string, { name: string; src: string }>();
-    for (const it of qrcodesRaw) {
-      if (!dedupMap.has(it.src)) dedupMap.set(it.src, it);
-    }
-    const qrcodes = Array.from(dedupMap.values());
 
     if (qrcodes.length) {
       await axios.put(`${wooBase}/orders/${orderId}`,
@@ -212,10 +244,10 @@ async function fulfillPaidOrder(params: {
       }
     }
   } else {
-    console.log(`[notify:${reqId}] eSIM already existed, skip generate.`);
+    console.log(`[notify:${reqId}] eSIM already existed, skip.`);
   }
 
-  // 3.3 開立電子發票（若尚未開）
+  // ---- 發票（若尚未開） ----
   const hasInvoice = (fullOrder?.meta_data || []).some((m: any) => m?.key === "invoice_number");
   if (!hasInvoice) {
     console.log(`[notify:${reqId}] issuing invoice...`);
@@ -358,13 +390,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
+    // ---- raw & 平面 body（只用來讀非密文字段）----
     const raw = await readBody(req);
     const ct  = String(req.headers["content-type"] || "");
-
-    // 只為了讀取 Status 等非密文字段（TI/TS 一律走 raw）
     const body: any = ct.includes("application/json") ? JSON.parse(raw || "{}") : qs.parse(raw);
     const Status = body?.Status as string | undefined;
 
+    // ★ 直接從 raw 抓 TI/TS，避免 parser 變動
     const getRawParam = (name: string): string | undefined => {
       const start = raw.indexOf(`${name}=`);
       if (start < 0) return undefined;
@@ -372,11 +404,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const amp = raw.indexOf("&", s);
       return (amp === -1 ? raw.slice(s) : raw.slice(s, amp)).trim();
     };
-
     const TI_raw = getRawParam("TradeInfo") || "";
     const TS_raw = getRawParam("TradeSha")  || "";
 
-    // 產生候選（避免 + 變空白）
+    // 產生候選（處理 +/decode）
     const getTIcandidates = (ti: string): string[] => {
       const out: string[] = [];
       const hasPct = /%[0-9a-fA-F]{2}/.test(ti);
@@ -397,23 +428,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     for (const cand of TI_candidates) {
       if (sha(cand, HASH_KEY, HASH_IV) === TS_raw) { TradeInfo = cand; shaOk = true; break; }
     }
-    console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}`);
+    console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}, tried=${TI_candidates.length}`);
 
-    // 解密
+    // 解密（先優先用通過驗章的，再對所有候選重試）
     let result: any = null;
     let decryptError: string | null = null;
+    let decodeMode = "";
 
     const trySmart = (ti: string) => {
       try {
-        // 先走通用解（hex/base64 自動判斷）
-        try { return parseDecrypted(aesDecryptSafe(ti, HASH_KEY, HASH_IV)); } catch {}
-        // 再強制 base64（確保沒有空白）
-        const tiBase64 = ti.replace(/\s/g, "+");
-        const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(HASH_KEY, "utf8"), Buffer.from(HASH_IV, "utf8"));
-        decipher.setAutoPadding(true);
-        let out = decipher.update(tiBase64, "base64", "utf8");
-        out += decipher.final("utf8");
-        return parseDecrypted(out);
+        const d = smartDecrypt(ti, HASH_KEY, HASH_IV);
+        if (!d) return null;
+        decodeMode = d.mode;
+        return parseDecrypted(d.plaintext);
       } catch (e: any) {
         decryptError = e?.message || String(e);
         return null;
@@ -431,11 +458,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
+    // 若仍解不出 Result，試著用平面欄位組最小 result（ATM 入帳有機會走得到）
+    if (!result) {
+      const maybe = {
+        MerchantOrderNo: body?.MerchantOrderNo || body?.MerchantOrderID || "",
+        PaymentType:     body?.PaymentType || "",
+        PayTime:         body?.PayTime || body?.PaymentTime || body?.PayDate || body?.CloseTime || "",
+        TradeNo:         body?.TradeNo || "",
+        Amt:             body?.Amt,
+      };
+      if (maybe.MerchantOrderNo) {
+        result = maybe;
+        console.warn(`[notify:${rid}] using plain-body fallback result`);
+      } else {
+        console.warn(`[notify:${rid}] decrypt error: ${decryptError || "unknown"}, mode=${decodeMode || "n/a"}`);
+      }
+    }
+
     const merchantOrderNo =
       result?.MerchantOrderNo || body?.MerchantOrderNo || body?.MerchantOrderID || "";
 
     if (!merchantOrderNo) {
-      console.warn(`[notify:${rid}] missing MerchantOrderNo. shaOk=${shaOk} err=${decryptError || "n/a"}`);
+      console.warn(`[notify:${rid}] missing MerchantOrderNo. shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}`);
       return res.status(200).end("OK");
     }
 
@@ -445,7 +489,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).end("OK");
     }
 
-    // 🧪 寫一筆 DEBUG 備註
+    // 🧪 debug 備註
     try {
       await axios.post(
         `${WC_API_BASE}/orders/${wooOrderId}/notes`,
@@ -455,6 +499,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             `Status=${Status || ""}`,
             `shaOk=${shaOk}`,
             `tiLen=${(TradeInfo || TI_raw).length}`,
+            decodeMode ? `decodeMode=${decodeMode}` : "",
             decryptError ? `decryptError=${decryptError}` : "",
             `PaymentType=${String(result?.PaymentType || "")}`,
             `HasPayMoment=${Boolean(hasPayMoment(result))}`,
@@ -514,24 +559,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    /* B) 已付款（信用卡或 ATM 真入帳）→ processing + 付款 meta + eSIM + 發票（冪等 + 完成旗標） */
+    /* B) 已付款（信用卡或 ATM 真入帳）→ processing + 付款 meta + eSIM + 發票（冪等） */
     else if (isPaid(result, Status)) {
       console.log(`[notify:${rid}] paid branch`);
-      // 先讀
-      let { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+      const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
         auth: { username: WC_CK, password: WC_CS },
       });
-
       const alreadyPaid = (current?.meta_data || []).some((m: any) => m?.key === "newebpay_pay_time");
-      const alreadyDone = (current?.meta_data || []).some((m: any) => m?.key === "esim_done_v1");
-
-      if (alreadyDone) {
-        console.log(`[notify:${rid}] esim_done_v1 present, skip everything.`);
-        return res.status(200).end("OK");
-      }
 
       if (!alreadyPaid) {
-        // 第一次：寫入付款 meta
         await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
           status: "processing",
           meta_data: [
@@ -541,55 +577,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           ],
         }, { auth: { username: WC_CK, password: WC_CS } });
 
-        // 重新抓 fullOrder
-        const fullOrderRes = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+        const { data: fullOrder } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
           auth: { username: WC_CK, password: WC_CS },
         });
-        current = fullOrderRes.data;
 
-        // 再保險一次：若此時已被別的重送流程完成就跳出
-        const doneNow = (current?.meta_data || []).some((m: any) => m?.key === "esim_done_v1");
-        if (doneNow) {
-          console.log(`[notify:${rid}] esim_done_v1 just set by another run, skip fulfill.`);
-          return res.status(200).end("OK");
-        }
-
-        // 執行 fulfill
         await fulfillPaidOrder({
           wooBase: WC_API_BASE, ck: WC_CK, cs: WC_CS,
-          orderId: wooOrderId, fullOrder: current, orderNumber: merchantOrderNo, result, reqId: rid,
+          orderId: wooOrderId, fullOrder, orderNumber: merchantOrderNo, result, reqId: rid,
         });
-
-        // ✅ 設定完成旗標（避免任何重送）
-        const doneValue = `${String(result?.TradeNo || "")}|${Date.now()}`;
-        await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
-          meta_data: [{ key: "esim_done_v1", value: doneValue }],
-        }, { auth: { username: WC_CK, password: WC_CS } });
 
         await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
           { note: `✅ 藍新金流已入帳（${payType}）\n交易序號：${result?.TradeNo || ""}\n入帳時間：${firstPayMoment(result)}`, customer_note: false },
           { auth: { username: WC_CK, password: WC_CS } }
         );
       } else {
-        console.log(`[notify:${rid}] already paid meta set, checking esim_done_v1...`);
-        // 已標記 paid，但萬一之前 fulfill 沒跑完（機率低），這裡補一次但仍以旗標防重
-        const fullOrderRes = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
-          auth: { username: WC_CK, password: WC_CS },
-        });
-        const fullOrder = fullOrderRes.data;
-        const done = (fullOrder?.meta_data || []).some((m: any) => m?.key === "esim_done_v1");
-        if (!done) {
-          await fulfillPaidOrder({
-            wooBase: WC_API_BASE, ck: WC_CK, cs: WC_CS,
-            orderId: wooOrderId, fullOrder, orderNumber: merchantOrderNo, result, reqId: rid,
-          });
-          const doneValue = `${String(result?.TradeNo || "")}|${Date.now()}`;
-          await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
-            meta_data: [{ key: "esim_done_v1", value: doneValue }],
-          }, { auth: { username: WC_CK, password: WC_CS } });
-        } else {
-          console.log(`[notify:${rid}] esim already done, skip.`);
-        }
+        console.log(`[notify:${rid}] already paid, skip.`);
       }
     }
 
