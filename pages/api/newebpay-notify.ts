@@ -8,12 +8,11 @@ import nodemailer from "nodemailer";
 
 /** 讓 Newebpay 能送 raw body（必須） */
 export const config = { api: { bodyParser: false } };
-const NOTIFY_VERSION = "v5.3.2";
+const NOTIFY_VERSION = "v6.0.0";
 
 /** ===== 建議改用 .env（此處沿用你現值） ===== */
-const MERCHANT_ID = "MS3788816305";
-const HASH_KEY    = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
-const HASH_IV     = "PKetlaZYZcZvlMmC";
+const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
+const HASH_IV  = "PKetlaZYZcZvlMmC";
 
 const WC_API_BASE = "https://fegoesim.com/wp-json/wc/v3";
 const WC_CK = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
@@ -32,12 +31,6 @@ const PLAN_ID_MAP: Record<string, string> = {
   "Malaysia-Daily500MB-1-A0": "90ab730c-b369-4144-a6f5-be4376494791",
 };
 
-/* ------------------------- Debug 控制 ------------------------- */
-const ENV_DEBUG_ON  = String(process.env.NEWEBPAY_DEBUG || "") === "1";
-const ENV_ECHO_HDR  = String(process.env.NEWEBPAY_ECHO_HEADERS || "") === "1";
-const ENV_ECHO_BODY = String(process.env.NEWEBPAY_ECHO_BODY || "") === "1";
-const isOn = (v?: string | string[]) => String(Array.isArray(v) ? v[0] : v || "").trim() === "1";
-
 /* ------------------------- helpers ------------------------- */
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -51,19 +44,68 @@ function sha(encrypted: string, key: string, iv: string) {
   const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
-/** 嘗試 hex → base64 → 反之；都失敗則 throw */
-function aesDecryptSafe(input: string, key: string, iv: string): string {
-  const ti = String(input || "").trim();
-  const tryDec = (enc: "hex" | "base64") => {
-    const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-    decipher.setAutoPadding(true);
-    let out = decipher.update(ti, enc, "utf8");
-    out += decipher.final("utf8");
-    return out;
-  };
-  if (/^[0-9a-fA-F]+$/.test(ti)) { try { return tryDec("hex"); } catch { return tryDec("base64"); } }
-  else                           { try { return tryDec("base64"); } catch { return tryDec("hex"); } }
+
+/* ====== 與 customer.ts 一致的「寬鬆解密」 ====== */
+function decryptHexLenient(encryptedHex: string, key: string, iv: string): { plaintext: string; mode: string } {
+  try {
+    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+    d.setAutoPadding(true);
+    let out = d.update(encryptedHex, "hex", "utf8"); out += d.final("utf8");
+    return { plaintext: out, mode: "hex-auto" };
+  } catch {}
+
+  const buf = Buffer.from(encryptedHex, "hex");
+  const d2  = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  d2.setAutoPadding(false);
+  const raw = Buffer.concat([d2.update(buf), d2.final()]);
+  const txt = raw.toString("utf8");
+
+  const l = txt.indexOf("{"); const r = txt.lastIndexOf("}");
+  if (l !== -1 && r !== -1 && r > l) return { plaintext: txt.slice(l, r + 1), mode: "hex-lenient-json" };
+
+  if (txt.includes("=") && txt.includes("&")) {
+    const lastAmp = txt.lastIndexOf("&");
+    return { plaintext: lastAmp > 0 ? txt.slice(0, lastAmp) : txt, mode: "hex-lenient-qs" };
+  }
+  return { plaintext: txt, mode: "hex-lenient-raw" };
 }
+function decryptBase64Lenient(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } {
+  const norm   = encrypted.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = norm + "===".slice((norm.length + 3) % 4);
+  try {
+    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+    d.setAutoPadding(true);
+    let out = d.update(padded, "base64", "utf8"); out += d.final("utf8");
+    return { plaintext: out, mode: "base64-auto" };
+  } catch {}
+
+  const buf = Buffer.from(padded, "base64");
+  const d2  = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  d2.setAutoPadding(false);
+  const raw = Buffer.concat([d2.update(buf), d2.final()]);
+  const txt = raw.toString("utf8");
+
+  const l = txt.indexOf("{"); const r = txt.lastIndexOf("}");
+  if (l !== -1 && r !== -1 && r > l) return { plaintext: txt.slice(l, r + 1), mode: "base64-lenient-json" };
+
+  if (txt.includes("=") && txt.includes("&")) {
+    const lastAmp = txt.lastIndexOf("&");
+    return { plaintext: lastAmp > 0 ? txt.slice(0, lastAmp) : txt, mode: "base64-lenient-qs" };
+  }
+  return { plaintext: txt, mode: "base64-lenient-raw" };
+}
+function smartDecrypt(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } | null {
+  const ti = String(encrypted || "").trim();
+  const isHex = /^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0;
+
+  if (isHex) {
+    try { return decryptHexLenient(ti, key, iv); } catch {}
+  } else {
+    try { return decryptBase64Lenient(ti, key, iv); } catch {}
+  }
+  return null;
+}
+
 function parseDecrypted(text: string): any {
   try {
     const obj = JSON.parse(text);
@@ -341,7 +383,6 @@ const ntd = (x: any) => `NT$ ${Math.round(Number(x || 0)).toLocaleString("zh-TW"
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const hint = String(req.headers["x-vercel-id"] || "");
   const rid = hint ? hint.split("::").pop()! : Math.random().toString(36).slice(2, 10);
-  const queryDebug = isOn(req.query.debug);
 
   res.setHeader("X-Notify-Rev", NOTIFY_VERSION);
   res.setHeader("X-Req-Id", rid);
@@ -354,26 +395,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const raw = await readBody(req);
     const ct  = String(req.headers["content-type"] || "");
-    const DEBUG = ENV_DEBUG_ON || queryDebug;
-    const ECHO_HEADERS = ENV_ECHO_HDR || queryDebug;
-    const ECHO_BODY    = ENV_ECHO_BODY || queryDebug;
 
-    const safeHeaders = (() => {
-      const pick = ["content-type","x-forwarded-for","x-real-ip","user-agent","x-vercel-id","x-matched-path","x-forwarded-host"];
-      const out: Record<string,string> = {};
-      pick.forEach(k => { const v = req.headers[k]; if (v) out[k]=String(v); });
-      return out;
-    })();
-
-    console.log(`[notify:${rid}] hit, ct=${ct}, rawLen=${raw.length}`);
-    if (DEBUG && ECHO_HEADERS) console.log(`[notify:${rid}] headers=`, safeHeaders);
-
-    // 只為了讀取 Status 等非密文字段，保留 parse；但 TI/TS 一律走 raw
+    // 只為了讀取 Status 等非密文字段（TI/TS 一律走 raw）
     const body: any = ct.includes("application/json") ? JSON.parse(raw || "{}") : qs.parse(raw);
     const Status = body?.Status as string | undefined;
-    console.log(`[notify:${rid}] parsed body keys=${Object.keys(body || {}).join(",")}`);
 
-    /** ★★★ 從 raw body 直接擷取參數，不讓任何 parser 改動 ★★★ */
     const getRawParam = (name: string): string | undefined => {
       const start = raw.indexOf(`${name}=`);
       if (start < 0) return undefined;
@@ -385,60 +411,40 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const TI_raw = getRawParam("TradeInfo") || "";
     const TS_raw = getRawParam("TradeSha")  || "";
 
-    /** 產生多個候選：原樣、decode 一次、將空白→+ 後再 decode（避免上游把 + 變空白或多/少 decode） */
+    // 產生候選（避免 + 變空白）
     const getTIcandidates = (ti: string): string[] => {
       const out: string[] = [];
       const hasPct = /%[0-9a-fA-F]{2}/.test(ti);
-
-      // 1) 原樣（最重要，避免把 + 變空白）
       out.push(ti);
-
-      // 2) 有 % 才 decode 一次
-      if (hasPct) {
-        try { out.push(decodeURIComponent(ti)); } catch {}
-      }
-
-      // 3) 無 % 但含空白，推測 + 被轉空白
+      if (hasPct) { try { out.push(decodeURIComponent(ti)); } catch {} }
       if (!hasPct && /\s/.test(ti)) {
         const restored = ti.replace(/\s/g, "+");
         out.push(restored);
         try { out.push(decodeURIComponent(restored)); } catch {}
       }
-
       return Array.from(new Set(out.filter(Boolean)));
     };
-
     const TI_candidates = getTIcandidates(TI_raw);
 
-    // 依序比對 SHA，找到與 TradeSha 相符的版本
+    // 先驗章
     let TradeInfo = "";
-    let TradeSha  = TS_raw;
     let shaOk = false;
-    for (const candidate of TI_candidates) {
-      if (sha(candidate, HASH_KEY, HASH_IV) === TradeSha) {
-        TradeInfo = candidate;
-        shaOk = true;
-        break;
-      }
+    for (const cand of TI_candidates) {
+      if (sha(cand, HASH_KEY, HASH_IV) === TS_raw) { TradeInfo = cand; shaOk = true; break; }
     }
-    console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}, src=raw-only, tried=${TI_candidates.length}`);
-    if (!shaOk) console.warn(`[notify:${rid}] TradeSha mismatch (all candidates tried)`);
+    console.log(`[notify:${rid}] shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}`);
 
-    // ---- 解密：先用通過 SHA 的版本；不行再對所有候選重試 ----
+    // 解密
     let result: any = null;
     let decryptError: string | null = null;
+    let decodeMode = "";
 
-    const tryDecrypt = (ti: string) => {
+    const trySmart = (ti: string) => {
       try {
-        // 先走通用解（hex/base64 自動判斷）
-        try { return parseDecrypted(aesDecryptSafe(ti, HASH_KEY, HASH_IV)); } catch {}
-        // 再強制 base64（確保沒有空白）
-        const tiBase64 = ti.replace(/\s/g, "+");
-        const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(HASH_KEY, "utf8"), Buffer.from(HASH_IV, "utf8"));
-        decipher.setAutoPadding(true);
-        let out = decipher.update(tiBase64, "base64", "utf8");
-        out += decipher.final("utf8");
-        return parseDecrypted(out);
+        const d = smartDecrypt(ti, HASH_KEY, HASH_IV);
+        if (!d) return null;
+        decodeMode = d.mode;
+        return parseDecrypted(d.plaintext);
       } catch (e: any) {
         decryptError = e?.message || String(e);
         return null;
@@ -446,29 +452,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     };
 
     if (shaOk && TradeInfo) {
-      const payload = tryDecrypt(TradeInfo);
+      const payload = trySmart(TradeInfo);
       result = payload?.Result ?? null;
     }
     if (!result) {
       for (const cand of TI_candidates) {
-        const payload = tryDecrypt(cand);
+        const payload = trySmart(cand);
         if (payload?.Result) { result = payload.Result; break; }
       }
-    }
-    if (!result) {
-      console.warn(`[notify:${rid}] decrypt error: ${decryptError || "unknown"}, candidates=${TI_candidates.length}`);
     }
 
     const merchantOrderNo =
       result?.MerchantOrderNo || body?.MerchantOrderNo || body?.MerchantOrderID || "";
 
     if (!merchantOrderNo) {
-      const preview = raw.slice(0, 512);
-      console.warn(`[notify:${rid}] missing MerchantOrderNo. ct=${ct}, shaOk=${shaOk}, tiLen=${(TradeInfo || TI_raw).length}`);
-      if (DEBUG) {
-        if (ECHO_BODY) console.log(`[notify:${rid}] raw[0..512]=${preview}`);
-        if (ECHO_HEADERS) console.log(`[notify:${rid}] headers(full)=`, safeHeaders);
-      }
+      console.warn(`[notify:${rid}] missing MerchantOrderNo. shaOk=${shaOk}, mode=${decodeMode || "n/a"} err=${decryptError || "n/a"}`);
       return res.status(200).end("OK");
     }
 
@@ -478,7 +476,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).end("OK");
     }
 
-    // 🧪 進入分支前，寫一筆 DEBUG 備註（Woo）
+    // 寫一筆 DEBUG 備註（看得到是否打到、是否解開）
     try {
       await axios.post(
         `${WC_API_BASE}/orders/${wooOrderId}/notes`,
@@ -488,6 +486,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             `Status=${Status || ""}`,
             `shaOk=${shaOk}`,
             `tiLen=${(TradeInfo || TI_raw).length}`,
+            decodeMode ? `decodeMode=${decodeMode}` : "",
             decryptError ? `decryptError=${decryptError}` : "",
             `PaymentType=${String(result?.PaymentType || "")}`,
             `HasPayMoment=${Boolean(hasPayMoment(result))}`,
@@ -590,6 +589,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(200).end("OK");
   } catch (e: any) {
     console.error(`[notify:${rid}] error:`, e?.message || e);
-    return res.status(200).end("OK"); // 仍回 200 避免藍新重試風暴
+    return res.status(200).end("OK"); // 回 200 避免藍新重試風暴
   }
 }
