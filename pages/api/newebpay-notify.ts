@@ -18,7 +18,7 @@ const WC_API_BASE = "https://fegoesim.com/wp-json/wc/v3";
 const WC_CK = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
 const WC_CS = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
-/** ===== eSIM / 發票設定（與 callback 同步） ===== */
+/** ===== eSIM / 發票設定 ===== */
 const ESIM_PROXY_URL = "https://www.wmesim.com/api/esim/qrcode";
 
 const INVOICE_API_URL     = "https://inv.ezpay.com.tw/Api/invoice_issue";
@@ -44,68 +44,19 @@ function sha(encrypted: string, key: string, iv: string) {
   const s = `HashKey=${key}&${encrypted}&HashIV=${iv}`;
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
-
-/* ====== 與 customer.ts 一致的「寬鬆解密」 ====== */
-function decryptHexLenient(encryptedHex: string, key: string, iv: string): { plaintext: string; mode: string } {
-  try {
-    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-    d.setAutoPadding(true);
-    let out = d.update(encryptedHex, "hex", "utf8"); out += d.final("utf8");
-    return { plaintext: out, mode: "hex-auto" };
-  } catch {}
-
-  const buf = Buffer.from(encryptedHex, "hex");
-  const d2  = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-  d2.setAutoPadding(false);
-  const raw = Buffer.concat([d2.update(buf), d2.final()]);
-  const txt = raw.toString("utf8");
-
-  const l = txt.indexOf("{"); const r = txt.lastIndexOf("}");
-  if (l !== -1 && r !== -1 && r > l) return { plaintext: txt.slice(l, r + 1), mode: "hex-lenient-json" };
-
-  if (txt.includes("=") && txt.includes("&")) {
-    const lastAmp = txt.lastIndexOf("&");
-    return { plaintext: lastAmp > 0 ? txt.slice(0, lastAmp) : txt, mode: "hex-lenient-qs" };
-  }
-  return { plaintext: txt, mode: "hex-lenient-raw" };
+/** 嘗試 hex → base64 → 反之；都失敗則 throw */
+function aesDecryptSafe(input: string, key: string, iv: string): string {
+  const ti = String(input || "").trim();
+  const tryDec = (enc: "hex" | "base64") => {
+    const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+    decipher.setAutoPadding(true);
+    let out = decipher.update(ti, enc, "utf8");
+    out += decipher.final("utf8");
+    return out;
+  };
+  if (/^[0-9a-fA-F]+$/.test(ti)) { try { return tryDec("hex"); } catch { return tryDec("base64"); } }
+  else                           { try { return tryDec("base64"); } catch { return tryDec("hex"); } }
 }
-function decryptBase64Lenient(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } {
-  const norm   = encrypted.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
-  const padded = norm + "===".slice((norm.length + 3) % 4);
-  try {
-    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-    d.setAutoPadding(true);
-    let out = d.update(padded, "base64", "utf8"); out += d.final("utf8");
-    return { plaintext: out, mode: "base64-auto" };
-  } catch {}
-
-  const buf = Buffer.from(padded, "base64");
-  const d2  = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
-  d2.setAutoPadding(false);
-  const raw = Buffer.concat([d2.update(buf), d2.final()]);
-  const txt = raw.toString("utf8");
-
-  const l = txt.indexOf("{"); const r = txt.lastIndexOf("}");
-  if (l !== -1 && r !== -1 && r > l) return { plaintext: txt.slice(l, r + 1), mode: "base64-lenient-json" };
-
-  if (txt.includes("=") && txt.includes("&")) {
-    const lastAmp = txt.lastIndexOf("&");
-    return { plaintext: lastAmp > 0 ? txt.slice(0, lastAmp) : txt, mode: "base64-lenient-qs" };
-  }
-  return { plaintext: txt, mode: "base64-lenient-raw" };
-}
-function smartDecrypt(encrypted: string, key: string, iv: string): { plaintext: string; mode: string } | null {
-  const ti = String(encrypted || "").trim();
-  const isHex = /^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0;
-
-  if (isHex) {
-    try { return decryptHexLenient(ti, key, iv); } catch {}
-  } else {
-    try { return decryptBase64Lenient(ti, key, iv); } catch {}
-  }
-  return null;
-}
-
 function parseDecrypted(text: string): any {
   try {
     const obj = JSON.parse(text);
@@ -196,16 +147,23 @@ function encryptAES(data: any, key: string, iv: string) {
   return encrypted;
 }
 
-/** 把「已付款後續」抽成共用：產 eSIM + 開發票（與 callback 同步） */
+/** 把「已付款後續」抽成共用：產 eSIM + 開發票（冪等 + 去重） */
 async function fulfillPaidOrder(params: {
   wooBase: string; ck: string; cs: string; orderId: number; fullOrder: any;
   orderNumber: string; result: any; reqId: string;
 }) {
   const { wooBase, ck, cs, orderId, fullOrder, orderNumber, result, reqId } = params;
 
+  // 🔒 如已完成，直接跳出（雙保險）
+  const doneMeta = (fullOrder?.meta_data || []).find((m: any) => m?.key === "esim_done_v1")?.value;
+  if (doneMeta) {
+    console.log(`[notify:${reqId}] esim_done_v1 exists (${doneMeta}), skip fulfill.`);
+    return;
+  }
+
   // 3.2 產 eSIM（若尚未產生）
   const alreadyHasEsim = (fullOrder?.meta_data || []).some((m: any) => m?.key === "esim_qrcodes");
-  const qrcodes: { name: string; src: string }[] = [];
+  const qrcodesRaw: { name: string; src: string }[] = [];
   const allImagesHtml: string[] = [];
 
   if (!alreadyHasEsim) {
@@ -226,15 +184,22 @@ async function fulfillPaidOrder(params: {
 
       list.forEach((raw: string, i: number) => {
         const src = raw.startsWith("http") ? raw : `data:image/png;base64,${raw}`;
-        qrcodes.push({ name: `${li.name} #${i + 1}`, src });
+        qrcodesRaw.push({ name: `${li.name} #${i + 1}`, src });
       });
 
       allImagesHtml.push(`<div><strong>${li.name}</strong><br/>${imagesHtml}</div>`);
       await axios.post(`${wooBase}/orders/${orderId}/notes`,
-        { note: `<strong>eSIM QRCode (${li.name}):</strong><br />${imagesHtml}`, customer_note: true },
+        { note: `<strong>eSIM QRCode（${li.name}）:</strong><br />${imagesHtml}`, customer_note: true },
         { auth: { username: ck, password: cs } }
       );
     }
+
+    // ✅ 以 src 去重
+    const dedupMap = new Map<string, { name: string; src: string }>();
+    for (const it of qrcodesRaw) {
+      if (!dedupMap.has(it.src)) dedupMap.set(it.src, it);
+    }
+    const qrcodes = Array.from(dedupMap.values());
 
     if (qrcodes.length) {
       await axios.put(`${wooBase}/orders/${orderId}`,
@@ -247,7 +212,7 @@ async function fulfillPaidOrder(params: {
       }
     }
   } else {
-    console.log(`[notify:${reqId}] eSIM already existed, skip.`);
+    console.log(`[notify:${reqId}] eSIM already existed, skip generate.`);
   }
 
   // 3.3 開立電子發票（若尚未開）
@@ -437,14 +402,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // 解密
     let result: any = null;
     let decryptError: string | null = null;
-    let decodeMode = "";
 
     const trySmart = (ti: string) => {
       try {
-        const d = smartDecrypt(ti, HASH_KEY, HASH_IV);
-        if (!d) return null;
-        decodeMode = d.mode;
-        return parseDecrypted(d.plaintext);
+        // 先走通用解（hex/base64 自動判斷）
+        try { return parseDecrypted(aesDecryptSafe(ti, HASH_KEY, HASH_IV)); } catch {}
+        // 再強制 base64（確保沒有空白）
+        const tiBase64 = ti.replace(/\s/g, "+");
+        const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(HASH_KEY, "utf8"), Buffer.from(HASH_IV, "utf8"));
+        decipher.setAutoPadding(true);
+        let out = decipher.update(tiBase64, "base64", "utf8");
+        out += decipher.final("utf8");
+        return parseDecrypted(out);
       } catch (e: any) {
         decryptError = e?.message || String(e);
         return null;
@@ -466,7 +435,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       result?.MerchantOrderNo || body?.MerchantOrderNo || body?.MerchantOrderID || "";
 
     if (!merchantOrderNo) {
-      console.warn(`[notify:${rid}] missing MerchantOrderNo. shaOk=${shaOk}, mode=${decodeMode || "n/a"} err=${decryptError || "n/a"}`);
+      console.warn(`[notify:${rid}] missing MerchantOrderNo. shaOk=${shaOk} err=${decryptError || "n/a"}`);
       return res.status(200).end("OK");
     }
 
@@ -476,7 +445,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).end("OK");
     }
 
-    // 寫一筆 DEBUG 備註（看得到是否打到、是否解開）
+    // 🧪 寫一筆 DEBUG 備註
     try {
       await axios.post(
         `${WC_API_BASE}/orders/${wooOrderId}/notes`,
@@ -486,7 +455,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             `Status=${Status || ""}`,
             `shaOk=${shaOk}`,
             `tiLen=${(TradeInfo || TI_raw).length}`,
-            decodeMode ? `decodeMode=${decodeMode}` : "",
             decryptError ? `decryptError=${decryptError}` : "",
             `PaymentType=${String(result?.PaymentType || "")}`,
             `HasPayMoment=${Boolean(hasPayMoment(result))}`,
@@ -546,23 +514,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    /* B) 已付款（信用卡或 ATM 真入帳）→ processing + 付款 meta + eSIM + 發票（冪等） */
+    /* B) 已付款（信用卡或 ATM 真入帳）→ processing + 付款 meta + eSIM + 發票（冪等 + 完成旗標） */
     else if (isPaid(result, Status)) {
       console.log(`[notify:${rid}] paid branch`);
-
-      // 先抓目前訂單與 meta
-      const { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+      // 先讀
+      let { data: current } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
         auth: { username: WC_CK, password: WC_CS },
       });
-      const meta = current?.meta_data || [];
-      const hasMeta  = (k: string) => meta.some((m: any) => m?.key === k);
-      const alreadyPaidMeta  = hasMeta("newebpay_pay_time");
-      const alreadyPaidNote  = hasMeta("newebpay_paid_note_v1");
-      const hasEsim   = hasMeta("esim_qrcodes") || hasMeta("esim_qrcode");
-      const hasInvoice= hasMeta("invoice_number");
 
-      // 補齊付款 meta 與狀態（缺才寫）
-      if (!alreadyPaidMeta) {
+      const alreadyPaid = (current?.meta_data || []).some((m: any) => m?.key === "newebpay_pay_time");
+      const alreadyDone = (current?.meta_data || []).some((m: any) => m?.key === "esim_done_v1");
+
+      if (alreadyDone) {
+        console.log(`[notify:${rid}] esim_done_v1 present, skip everything.`);
+        return res.status(200).end("OK");
+      }
+
+      if (!alreadyPaid) {
+        // 第一次：寫入付款 meta
         await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
           status: "processing",
           meta_data: [
@@ -571,41 +540,56 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             { key: "newebpay_payment_type", value: payType },
           ],
         }, { auth: { username: WC_CK, password: WC_CS } });
-      } else {
-        // 若已入帳但狀態仍非 processing（例如 on-hold），幫忙糾正
-        if (String(current?.status) === "on_hold" || String(current?.status) === "pending") {
-          await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`,
-            { status: "processing" },
-            { auth: { username: WC_CK, password: WC_CS } }
-          );
+
+        // 重新抓 fullOrder
+        const fullOrderRes = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+          auth: { username: WC_CK, password: WC_CS },
+        });
+        current = fullOrderRes.data;
+
+        // 再保險一次：若此時已被別的重送流程完成就跳出
+        const doneNow = (current?.meta_data || []).some((m: any) => m?.key === "esim_done_v1");
+        if (doneNow) {
+          console.log(`[notify:${rid}] esim_done_v1 just set by another run, skip fulfill.`);
+          return res.status(200).end("OK");
         }
-      }
 
-      // 再抓一次最新，避免 meta 舊
-      const { data: fullOrder } = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
-        auth: { username: WC_CK, password: WC_CS },
-      });
-
-      // ⭐ 關鍵冪等：只要 eSIM 或 發票還沒生成，就執行 fulfill
-      if (!hasEsim || !hasInvoice) {
+        // 執行 fulfill
         await fulfillPaidOrder({
           wooBase: WC_API_BASE, ck: WC_CK, cs: WC_CS,
-          orderId: wooOrderId, fullOrder, orderNumber: merchantOrderNo, result, reqId: rid,
+          orderId: wooOrderId, fullOrder: current, orderNumber: merchantOrderNo, result, reqId: rid,
         });
-      } else {
-        console.log(`[notify:${rid}] eSIM & invoice already present, skip fulfill.`);
-      }
 
-      // 付款完成備註（冪等）
-      if (!alreadyPaidNote) {
+        // ✅ 設定完成旗標（避免任何重送）
+        const doneValue = `${String(result?.TradeNo || "")}|${Date.now()}`;
+        await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
+          meta_data: [{ key: "esim_done_v1", value: doneValue }],
+        }, { auth: { username: WC_CK, password: WC_CS } });
+
         await axios.post(`${WC_API_BASE}/orders/${wooOrderId}/notes`,
           { note: `✅ 藍新金流已入帳（${payType}）\n交易序號：${result?.TradeNo || ""}\n入帳時間：${firstPayMoment(result)}`, customer_note: false },
           { auth: { username: WC_CK, password: WC_CS } }
         );
-        await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`,
-          { meta_data: [{ key: "newebpay_paid_note_v1", value: "1" }] },
-          { auth: { username: WC_CK, password: WC_CS } }
-        );
+      } else {
+        console.log(`[notify:${rid}] already paid meta set, checking esim_done_v1...`);
+        // 已標記 paid，但萬一之前 fulfill 沒跑完（機率低），這裡補一次但仍以旗標防重
+        const fullOrderRes = await axios.get(`${WC_API_BASE}/orders/${wooOrderId}`, {
+          auth: { username: WC_CK, password: WC_CS },
+        });
+        const fullOrder = fullOrderRes.data;
+        const done = (fullOrder?.meta_data || []).some((m: any) => m?.key === "esim_done_v1");
+        if (!done) {
+          await fulfillPaidOrder({
+            wooBase: WC_API_BASE, ck: WC_CK, cs: WC_CS,
+            orderId: wooOrderId, fullOrder, orderNumber: merchantOrderNo, result, reqId: rid,
+          });
+          const doneValue = `${String(result?.TradeNo || "")}|${Date.now()}`;
+          await axios.put(`${WC_API_BASE}/orders/${wooOrderId}`, {
+            meta_data: [{ key: "esim_done_v1", value: doneValue }],
+          }, { auth: { username: WC_CK, password: WC_CS } });
+        } else {
+          console.log(`[notify:${rid}] esim already done, skip.`);
+        }
       }
     }
 
