@@ -75,6 +75,59 @@ function readQRCodes(meta, namePrefix = "eSIM") {
   return results;
 }
 
+/* ====== 讀取非即時付款資訊（VACC/CVS/WEBATM） ====== */
+const OFFSITE_TYPES = new Set(["VACC", "CVS", "WEBATM"]);
+function readOffsiteInfo(order) {
+  const meta = order?.meta_data || [];
+  const getMeta = (k) => meta.find((m) => m?.key === k)?.value;
+
+  // 優先：newebpay_offsite_info（JSON）
+  let info = null;
+  const rawInfo = getMeta("newebpay_offsite_info");
+  if (rawInfo) {
+    try {
+      info = typeof rawInfo === "string" ? JSON.parse(rawInfo) : rawInfo;
+    } catch {}
+  }
+
+  // 次之：個別欄位
+  const paymentType = (
+    info?.PaymentType ||
+    getMeta("newebpay_payment_type") ||
+    order?.paymentType ||
+    order?.payment_method_title ||
+    ""
+  )
+    .toString()
+    .toUpperCase();
+
+  const bank = info?.BankCode || getMeta("newebpay_bank_code") || "";
+  const codeNo =
+    info?.CodeNo || info?.PaymentNo || getMeta("newebpay_code_no") || "";
+  const expire = info?.ExpireDate || getMeta("newebpay_expire_date") || "";
+  const tradeNo = info?.TradeNo || "";
+
+  // 是否已付款（看 meta 是否有 pay_time）
+  const paidTime = getMeta("newebpay_pay_time");
+  const isPaid =
+    Boolean(paidTime) || ["processing", "completed"].includes(order?.status);
+
+  return {
+    paymentType,
+    bankCode: bank,
+    codeNo,
+    expireDate: expire,
+    tradeNo,
+    amount: order?.total,
+    isPaid,
+    // 此訂單是否「尚未入帳」且為非即時付款類型
+    show:
+      OFFSITE_TYPES.has(paymentType) &&
+      !isPaid &&
+      ["on_hold", "pending"].includes(order?.status),
+  };
+}
+
 /* ===== Skeleton ===== */
 const OrderSkeletonGrid = ({ count = 8 }) => (
   <ul className="grid grid-cols-1 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3">
@@ -99,7 +152,7 @@ const AccountPage = () => {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersLoaded, setOrdersLoaded] = useState(false);
   const [favorites, setFavorites] = useState([]);
-  const [activeTab, setActiveTab] = useState("info"); // info | qrcode
+  const [activeTab, setActiveTab] = useState("info"); // info | qrcode | remit
   const [editingEmail, setEditingEmail] = useState("");
   const [editingPhone, setEditingPhone] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -214,9 +267,13 @@ const AccountPage = () => {
     setFavorites(fav);
   }, [router, loadOrders]);
 
-  // 切到「QRCode 訂單」時，如果尚未載入完成就觸發載入（雙保險）
+  // 切到「QRCode 訂單」或「匯款資訊」時，如果尚未載入完成就觸發載入（雙保險）
   useEffect(() => {
-    if (activeTab === "qrcode" && !ordersLoaded && userInfo) {
+    if (
+      (activeTab === "qrcode" || activeTab === "remit") &&
+      !ordersLoaded &&
+      userInfo
+    ) {
       loadOrders(userInfo);
     }
   }, [activeTab, ordersLoaded, userInfo, loadOrders]);
@@ -261,8 +318,27 @@ const AccountPage = () => {
     }
   };
 
+  /* ===== 匯款資訊：UI & 邏輯 ===== */
+  const copy = async (text) => {
+    try {
+      await navigator.clipboard.writeText(String(text || ""));
+      alert("已複製到剪貼簿");
+    } catch (e) {
+      warn("無法複製（瀏覽器權限受限）", e?.message);
+    }
+  };
+
+  const refreshOrders = async () => {
+    if (userInfo) await loadOrders(userInfo);
+  };
+
   if (!userInfo)
     return <p className="mt-40 text-center">正在載入會員資料...</p>;
+
+  // 依現有訂單，挑出需要顯示匯款資訊的
+  const remitOrders = (orders || [])
+    .map((o) => ({ order: o, remit: readOffsiteInfo(o) }))
+    .filter((x) => x.remit.show);
 
   return (
     <Layout>
@@ -314,6 +390,18 @@ const AccountPage = () => {
                       }`}
                     >
                       QR Code 訂單
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      onClick={() => setActiveTab("remit")}
+                      className={`block w-full text-left px-4 py-2 rounded-[5px] ${
+                        activeTab === "remit"
+                          ? "bg-[#1757FF] text-white font-bold"
+                          : "bg-white text-gray-700"
+                      }`}
+                    >
+                      匯款資訊
                     </button>
                   </li>
                 </ul>
@@ -431,7 +519,6 @@ const AccountPage = () => {
                     >
                       <h2 className="text-2xl font-semibold mb-4">我的訂單</h2>
 
-                      {/* 載入中顯示 skeleton；載入完成後再依訂單數量顯示結果 */}
                       {ordersLoading ? (
                         <OrderSkeletonGrid count={8} />
                       ) : orders.length === 0 ? (
@@ -523,6 +610,149 @@ const AccountPage = () => {
                             })}
                           </ul>
                         </div>
+                      )}
+                    </motion.div>
+                  )}
+
+                  {/* 匯款資訊 */}
+                  {activeTab === "remit" && (
+                    <motion.div
+                      key="remit"
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -20 }}
+                      transition={{ duration: 0.3 }}
+                      className=" top-0 left-0 w-full bg-white rounded-[6px] p-4 sm:p-8"
+                    >
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-2xl font-semibold">
+                          匯款 / 繳費資訊
+                        </h2>
+                        <button
+                          onClick={refreshOrders}
+                          className="px-3 py-1.5 text-sm rounded bg-gray-100 hover:bg-gray-200"
+                        >
+                          重新整理
+                        </button>
+                      </div>
+
+                      {ordersLoading ? (
+                        <OrderSkeletonGrid count={4} />
+                      ) : remitOrders.length === 0 ? (
+                        <p className="text-gray-600">
+                          目前沒有待匯款 / 待繳費的訂單。
+                          若您剛完成付款，請點上方「重新整理」更新狀態。
+                        </p>
+                      ) : (
+                        <ul className="space-y-4">
+                          {remitOrders.map(({ order, remit }) => (
+                            <li key={order.id} className="border rounded p-4">
+                              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                                <div>
+                                  <p className="text-sm text-gray-500">
+                                    訂單編號 #{order.id}
+                                  </p>
+                                  <p className="font-semibold">
+                                    付款方式：{remit.paymentType}
+                                  </p>
+                                </div>
+                                <div className="text-sm text-gray-600">
+                                  金額：NT$
+                                  <span className="font-semibold">
+                                    {formatNTDNoDecimals(order.total)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="grid sm:grid-cols-2 gap-3 text-sm mt-3">
+                                {remit.bankCode && (
+                                  <div className="bg-gray-50 rounded p-3">
+                                    <p className="text-gray-500">銀行代碼</p>
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-semibold">
+                                        {remit.bankCode}
+                                      </span>
+                                      <button
+                                        onClick={() => copy(remit.bankCode)}
+                                        className="px-2 py-0.5 text-xs rounded bg-gray-200 hover:bg-gray-300"
+                                      >
+                                        複製
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                                {remit.codeNo && (
+                                  <div className="bg-gray-50 rounded p-3">
+                                    <p className="text-gray-500">
+                                      {remit.paymentType === "VACC"
+                                        ? "轉帳帳號"
+                                        : "繳費代碼"}
+                                    </p>
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-semibold break-all">
+                                        {remit.codeNo}
+                                      </span>
+                                      <button
+                                        onClick={() => copy(remit.codeNo)}
+                                        className="px-2 py-0.5 text-xs rounded bg-gray-200 hover:bg-gray-300"
+                                      >
+                                        複製
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                                {remit.expireDate && (
+                                  <div className="bg-gray-50 rounded p-3">
+                                    <p className="text-gray-500">繳費期限</p>
+                                    <p className="font-semibold">
+                                      {remit.expireDate}
+                                    </p>
+                                  </div>
+                                )}
+                                {remit.tradeNo && (
+                                  <div className="bg-gray-50 rounded p-3">
+                                    <p className="text-gray-500">交易序號</p>
+                                    <p className="font-semibold">
+                                      {remit.tradeNo}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {/* 前往 pending 頁面（以商店訂單號 newebpay_order_no 為主；若沒有就用 Woo id） */}
+                                {(() => {
+                                  const meta = order.meta_data || [];
+                                  const npNo = meta.find(
+                                    (m) => m?.key === "newebpay_order_no"
+                                  )?.value;
+                                  const orderNo = npNo || String(order.id);
+                                  return (
+                                    <Link
+                                      href={`/pending?orderNo=${encodeURIComponent(
+                                        orderNo
+                                      )}`}
+                                      className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm"
+                                    >
+                                      前往訂單追蹤
+                                    </Link>
+                                  );
+                                })()}
+                                <button
+                                  onClick={refreshOrders}
+                                  className="px-3 py-1.5 rounded border text-sm"
+                                >
+                                  我已完成付款，重新整理狀態
+                                </button>
+                              </div>
+
+                              <p className="text-xs text-gray-500 mt-3">
+                                ＊完成轉帳或繳費後，系統會自動更新訂單狀態（通常數分鐘內）。
+                                若長時間未更新，請聯繫客服並提供訂單編號與付款憑證。
+                              </p>
+                            </li>
+                          ))}
+                        </ul>
                       )}
                     </motion.div>
                   )}
