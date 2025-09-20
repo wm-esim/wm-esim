@@ -182,15 +182,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const tradeSha = shaEncrypt(encrypted, HASH_KEY, HASH_IV);
 
   /* === Step3: 回傳自動送出表單 === */
-  const html = `
-    <form id="newebpay-form" method="post" action="https://core.newebpay.com/MPG/mpg_gateway">
-      <input type="hidden" name="MerchantID" value="${MERCHANT_ID}" />
-      <input type="hidden" name="TradeInfo" value="${encrypted}" />
-      <input type="hidden" name="TradeSha" value="${tradeSha}" />
-      <input type="hidden" name="Version" value="2.3" />
-    </form>
-    <script>document.getElementById("newebpay-form").submit();</script>
-  `;
+const html = `
+  <form id="newebpay-form" method="post" action="https://core.newebpay.com/MPG/mpg_gateway">
+    <input type="hidden" name="MerchantID" value="${MERCHANT_ID}" />
+    <input type="hidden" name="TradeInfo" value="${encrypted}" />
+    <input type="hidden" name="TradeSha" value="${tradeSha}" />
+    <input type="hidden" name="Version" value="2.3" />
+  </form>
+  <script>
+    try { localStorage.setItem("lastOrderNo", ${JSON.stringify(orderNo)}); } catch(e) {}
+    document.getElementById("newebpay-form").submit();
+  </script>
+`;
+
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 }

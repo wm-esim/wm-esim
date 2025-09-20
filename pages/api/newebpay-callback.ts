@@ -120,9 +120,10 @@ function isOffsitePending(result: any) {
 
 /** ========== handler ========== */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") {
-    return res.redirect(302, `/thank-you?status=error`);
-  }
+if (req.method !== "POST") {
+  return res.status(200).send("OK");
+}
+
 
   try {
     const raw = await readBody(req);

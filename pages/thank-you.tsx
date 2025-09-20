@@ -38,17 +38,23 @@ export default function ThankYouPage() {
 
   const { clearCart } = useCart();
 
-  // 只取一次：優先 URL ?orderNo=，否則用 localStorage('lastOrderNo')
+  // 只取一次：優先 URL ?orderNo=，其次 lastOrderNo（但有 status 且沒 orderNo 時不要 fallback）
   const orderNo = useMemo<string>(() => {
     if (typeof window === "undefined") return "";
     const p = new URLSearchParams(window.location.search);
     const fromUrl = p.get("orderNo") || "";
+    const hasStatusOnly = !!p.get("status") && !fromUrl;
+
     if (fromUrl) {
       try {
         localStorage.setItem("lastOrderNo", fromUrl);
       } catch {}
       return fromUrl;
     }
+
+    // ⛔ 有 status 但沒有 orderNo → 視為本次未知，不要用舊單
+    if (hasStatusOnly) return "";
+
     try {
       return localStorage.getItem("lastOrderNo") || "";
     } catch {
