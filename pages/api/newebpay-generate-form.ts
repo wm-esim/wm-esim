@@ -189,10 +189,14 @@ const html = `
     <input type="hidden" name="TradeSha" value="${tradeSha}" />
     <input type="hidden" name="Version" value="2.3" />
   </form>
-  <script>
-    try { localStorage.setItem("lastOrderNo", ${JSON.stringify(orderNo)}); } catch(e) {}
-    document.getElementById("newebpay-form").submit();
-  </script>
+<script>
+  try {
+    var payload = { orderNo: ${JSON.stringify(orderNo)}, ts: Date.now() };
+    localStorage.setItem("lastOrderNo", ${JSON.stringify(orderNo)});
+    localStorage.setItem("lastOrderNoPayload", JSON.stringify(payload));
+  } catch(e) {}
+  document.getElementById("newebpay-form").submit();
+</script>
 `;
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
