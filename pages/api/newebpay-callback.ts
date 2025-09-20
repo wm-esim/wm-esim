@@ -110,7 +110,10 @@ function firstPayMoment(result: any) {
 function isPaid(result: any, status?: string) {
   const t = String(result?.PaymentType || "").toUpperCase();
   const paid = hasPayMoment(result);
-  if (t === "CREDIT") return status === "SUCCESS";
+  if (t === "CREDIT") {
+    // 信用卡以 Status 為準；若少數金流會回 PayTime，也一併視為已付
+    return status === "SUCCESS" || paid;
+  }
   return paid;
 }
 function isOffsitePending(result: any) {
@@ -120,10 +123,10 @@ function isOffsitePending(result: any) {
 
 /** ========== handler ========== */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-if (req.method !== "POST") {
-  return res.status(200).send("OK");
-}
-
+  // 若被誤以 GET 方式存取，不要導去 error，直接結束即可（避免 ThankYou 拿不到 orderNo）
+  if (req.method !== "POST") {
+    return res.status(200).send("OK");
+  }
 
   try {
     const raw = await readBody(req);
@@ -156,16 +159,12 @@ if (req.method !== "POST") {
       const hasPct = /%[0-9a-fA-F]{2}/.test(TI_raw);
       out.push(TI_raw);
       if (hasPct) {
-        try {
-          out.push(decodeURIComponent(TI_raw));
-        } catch {}
+        try { out.push(decodeURIComponent(TI_raw)); } catch {}
       }
       if (!hasPct && /\s/.test(TI_raw)) {
         const restored = TI_raw.replace(/\s/g, "+");
         out.push(restored);
-        try {
-          out.push(decodeURIComponent(restored));
-        } catch {}
+        try { out.push(decodeURIComponent(restored)); } catch {}
       }
       return Array.from(new Set(out.filter(Boolean)));
     })();
@@ -190,12 +189,18 @@ if (req.method !== "POST") {
       return res.redirect(302, `/thank-you?status=error`);
     }
 
-    const status = payload?.Status as string | undefined; // SUCCESS / ...
+    // ⚠️ 信用卡流程常見：Status 不在解密後 payload，而在外層 body
+    const status =
+      (payload?.Status as string | undefined) ||
+      (body?.Status as string | undefined) ||
+      (body?.status as string | undefined);
+
     const result = payload?.Result || {};
     const orderNo =
       result?.MerchantOrderNo ||
       result?.MerchantOrderID ||
       body?.MerchantOrderNo ||
+      body?.MerchantOrderID ||
       "";
 
     if (!orderNo) {
