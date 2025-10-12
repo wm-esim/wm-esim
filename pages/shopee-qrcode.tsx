@@ -12,7 +12,7 @@ export default function ShopeeQRCodePage() {
     setMessage("");
 
     try {
-      const res = await fetch("http://localhost:3000/api/shopee-to-esim", {
+      const res = await fetch("/api/shopee-to-esim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shopee_order_no: orderNo, email }),
