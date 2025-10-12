@@ -321,7 +321,8 @@ const LoginRegisterPage = () => {
         </div>
         <div className="mt-10">
           <span className="text-[14px] text-gray-500">
-            備註：請填入正確的 Email，此 Email 會拿來當作發送 QR CODE兌換的依據
+            備註：請填入正確的 Email，此 Email 會拿來當作發送 QR
+            CODE兌換的依據。
           </span>
         </div>
       </div>
