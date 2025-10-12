@@ -1,3 +1,4 @@
+// pages/blog/[slug].jsx
 import Head from "next/head";
 import { useRouter } from "next/router";
 import parse from "html-react-parser";
@@ -7,53 +8,44 @@ import Layout from "../Layout";
 const OtherPostsCarousel = dynamic(() =>
   import("../../components/OtherPostsCarousel")
 );
+
+/* ---------- ENV & helpers ---------- */
+// 站點
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+  "https://www.wmesim.com";
+
+// WP API base（支援 WP_API_BASE_URL 或 NEXT_PUBLIC_WP_API_BASE_URL；自動補 /wp-json）
+const WP_BASE_RAW =
+  process.env.WP_API_BASE_URL ||
+  process.env.NEXT_PUBLIC_WP_API_BASE_URL ||
+  "https://fegoesim.com";
+const WP_BASE = WP_BASE_RAW.replace(/\/+$/, "");
+
+// 產生 WP REST URL
+const wp = (p) => `${WP_BASE}/wp-json${p}`;
+
+// 取代貼文中跨網域資源到本站網域（如果需要）
+const swapToSite = (url = "") =>
+  typeof url === "string" ? url.replace(/^https?:\/\/[^/]+/i, SITE_URL) : url;
+
+/* ---------- Page ---------- */
 export default function PostPage({ post, relatedPosts = [] }) {
   const router = useRouter();
   if (router.isFallback) return <div>Loading...</div>;
+  if (!post) return <div>Not Found</div>;
 
-  const seo = post.yoast_head_json;
-  const canonicalUrl = seo?.canonical?.replace(
-    "https://dyx.wxv.mybluehost.me/website_a8bfc44c",
-    "https://www.wmesim.com"
-  );
-  const ogUrl = seo?.og_url?.replace(
-    "https://dyx.wxv.mybluehost.me/website_a8bfc44c",
-    "https://www.wmesim.com"
-  );
+  const seo = post.yoast_head_json || {};
+  const canonicalUrl = seo?.canonical?.startsWith("http")
+    ? seo.canonical
+    : `${SITE_URL}/blog/${post.slug}`;
+  const ogUrl = seo?.og_url || canonicalUrl;
 
-  const breadcrumbJsonLd = {
-    "@context": "https://schema.org",
-    "@type": "BreadcrumbList",
-    itemListElement: [
-      {
-        "@type": "ListItem",
-        position: 1,
-        name: "首頁",
-        item: "https://www.wmesim.com",
-      },
-      {
-        "@type": "ListItem",
-        position: 2,
-        name: "部落格",
-        item: "https://www.wmesim.com/blog",
-      },
-      {
-        "@type": "ListItem",
-        position: 3,
-        name: post.title.rendered,
-        item: canonicalUrl,
-      },
-    ],
-  };
-
-  const firstImageMatch = post.content.rendered.match(
+  // 取得文內第一張圖做 og:image
+  const firstImageMatch = post.content?.rendered?.match(
     /<img[^>]+src="([^">]+)"/
   );
-  const firstImage =
-    firstImageMatch?.[1]?.replace(
-      "https://dyx.wxv.mybluehost.me/website_a8bfc44c",
-      "https://www.wmesim.com"
-    ) || "https://www.wmesim.com/logo.png";
+  const firstImage = swapToSite(firstImageMatch?.[1]) || `${SITE_URL}/logo.png`;
 
   const fallbackDescription =
     post.excerpt?.rendered?.replace(/<[^>]+>/g, "")?.slice(0, 160) ||
@@ -61,19 +53,16 @@ export default function PostPage({ post, relatedPosts = [] }) {
   const fallbackKeywords = `${post.title.rendered}, eSIM, 台灣eSIM, 旅遊上網, 日本旅遊, 自由行, 簽證, 2025`;
 
   const renderContent = (html) =>
-    parse(html, {
+    parse(html || "", {
       replace: (node) => {
-        if (node.name === "img" && node.attribs?.src) {
-          const src = node.attribs.src.replace(
-            "https://dyx.wxv.mybluehost.me/website_a8bfc44c",
-            "https://www.wmesim.com"
-          );
+        if (node?.type === "tag" && node.name === "img" && node.attribs?.src) {
+          const src = swapToSite(node.attribs.src);
           return (
             <img
               src={src}
               alt={node.attribs.alt || ""}
-              width="100%"
               loading="lazy"
+              style={{ width: "100%", height: "auto" }}
             />
           );
         }
@@ -98,31 +87,49 @@ export default function PostPage({ post, relatedPosts = [] }) {
                 name="robots"
                 content={`${seo.robots.index}, ${seo.robots.follow}`}
               />
-              <meta name="max-snippet" content={seo.robots["max-snippet"]} />
-              <meta
-                name="max-image-preview"
-                content={seo.robots["max-image-preview"]}
-              />
-              <meta
-                name="max-video-preview"
-                content={seo.robots["max-video-preview"]}
-              />
+              {"max-snippet" in seo.robots && (
+                <meta name="max-snippet" content={seo.robots["max-snippet"]} />
+              )}
+              {"max-image-preview" in seo.robots && (
+                <meta
+                  name="max-image-preview"
+                  content={seo.robots["max-image-preview"]}
+                />
+              )}
+              {"max-video-preview" in seo.robots && (
+                <meta
+                  name="max-video-preview"
+                  content={seo.robots["max-video-preview"]}
+                />
+              )}
             </>
           )}
 
-          <meta property="og:title" content={seo?.og_title} />
+          <meta
+            property="og:title"
+            content={seo?.og_title || post.title.rendered}
+          />
           <meta
             property="og:description"
             content={seo?.og_description || fallbackDescription}
           />
-          <meta property="og:type" content={seo?.og_type} />
+          <meta property="og:type" content={seo?.og_type || "article"} />
           <meta property="og:url" content={ogUrl} />
-          <meta property="og:site_name" content={seo?.og_site_name} />
-          <meta property="og:locale" content={seo?.og_locale} />
+          <meta
+            property="og:site_name"
+            content={seo?.og_site_name || "wmesim"}
+          />
+          <meta property="og:locale" content={seo?.og_locale || "zh_TW"} />
           <meta property="og:image" content={firstImage} />
 
-          <meta name="twitter:card" content={seo?.twitter_card} />
-          <meta name="twitter:title" content={seo?.twitter_title} />
+          <meta
+            name="twitter:card"
+            content={seo?.twitter_card || "summary_large_image"}
+          />
+          <meta
+            name="twitter:title"
+            content={seo?.twitter_title || post.title.rendered}
+          />
           <meta
             name="twitter:description"
             content={seo?.twitter_description || fallbackDescription}
@@ -135,10 +142,7 @@ export default function PostPage({ post, relatedPosts = [] }) {
               dangerouslySetInnerHTML={{
                 __html: JSON.stringify({
                   ...seo.schema,
-                  mainEntityOfPage: {
-                    "@type": "WebPage",
-                    "@id": canonicalUrl,
-                  },
+                  mainEntityOfPage: { "@type": "WebPage", "@id": canonicalUrl },
                   image: firstImage,
                 }),
               }}
@@ -148,17 +152,39 @@ export default function PostPage({ post, relatedPosts = [] }) {
           <script
             type="application/ld+json"
             dangerouslySetInnerHTML={{
-              __html: JSON.stringify(breadcrumbJsonLd),
+              __html: JSON.stringify({
+                "@context": "https://schema.org",
+                "@type": "BreadcrumbList",
+                itemListElement: [
+                  {
+                    "@type": "ListItem",
+                    position: 1,
+                    name: "首頁",
+                    item: SITE_URL,
+                  },
+                  {
+                    "@type": "ListItem",
+                    position: 2,
+                    name: "部落格",
+                    item: `${SITE_URL}/blog`,
+                  },
+                  {
+                    "@type": "ListItem",
+                    position: 3,
+                    name: post.title.rendered,
+                    item: canonicalUrl,
+                  },
+                ],
+              }),
             }}
           />
         </Head>
 
-        <div className="max-w-[1920] mt-20 xl:w-[85%] flex flex-col lg:flex-row w-[95%] mx-auto px-4 py-10">
-          <article className="prose w-full p-8 lg:w-[80%] dark:prose-invert ">
+        <div className="max-w-[1920px] mt-20 xl:w-[85%] flex flex-col lg:flex-row w-[95%] mx-auto px-4 py-10">
+          <article className="prose w-full p-8 lg:w-[80%] dark:prose-invert">
             <h1 className="text-[5vmin]">{post.title.rendered}</h1>
 
-            {/* ✅ 導覽列 + 更新日期 */}
-            <div className="navgation py-5 flex  justify-between text-sm text-gray-500 mt-1 mb-6">
+            <div className="navgation py-5 flex justify-between text-sm text-gray-500 mt-1 mb-6">
               <span>
                 <a href="/" className="text-blue-600 hover:underline">
                   首頁
@@ -169,27 +195,23 @@ export default function PostPage({ post, relatedPosts = [] }) {
                 </a>{" "}
                 &gt; <span>{post.title.rendered}</span>
               </span>
-              <br />
               <span>
                 最後更新時間：
                 {new Date(post.modified).toLocaleDateString("zh-TW")}
               </span>
             </div>
 
-            {renderContent(post.content.rendered)}
+            {renderContent(post.content?.rendered)}
           </article>
-          <div className="sidebar w-full lg:w-[20%] p-4 space-y-6">
+
+          <aside className="sidebar w-full lg:w-[20%] p-4 space-y-6">
             <div className="same-category sticky top-8">
               <h3 className="text-lg font-semibold mb-4">更多相似文章</h3>
               {relatedPosts.map((item) => {
-                const imageMatch = item.content.rendered.match(
+                const imgMatch = item.content?.rendered?.match(
                   /<img[^>]+src="([^">]+)"/
                 );
-                const previewImg = imageMatch?.[1]?.replace(
-                  "https://dyx.wxv.mybluehost.me/website_a8bfc44c",
-                  "https://www.wmesim.com"
-                );
-
+                const previewImg = swapToSite(imgMatch?.[1]);
                 return (
                   <div key={item.id} className="mb-6 border-b pb-4">
                     {previewImg && (
@@ -213,8 +235,9 @@ export default function PostPage({ post, relatedPosts = [] }) {
                 );
               })}
             </div>
-          </div>
+          </aside>
         </div>
+
         <section className="section-others-blog max-w-[1920px] mx-auto xl:w-[85%] w-[90%] py-10">
           <OtherPostsCarousel />
         </section>
@@ -223,47 +246,43 @@ export default function PostPage({ post, relatedPosts = [] }) {
   );
 }
 
+/* ---------- SSG/ISR ---------- */
+// 不在 build 階段預抓，避免 TLS/CERT 問題；首訪阻塞產生，之後走 ISR。
 export async function getStaticPaths() {
-  const res = await fetch(
-    `https://fegoesim.com/wp-json/wp/v2/posts?_fields=slug&per_page=20`
-  );
-  const posts = await res.json();
-
-  const paths = posts.map((post) => ({
-    params: { slug: post.slug },
-  }));
-
-  return {
-    paths,
-    fallback: true,
-  };
+  return { paths: [], fallback: "blocking" };
 }
 
 export async function getStaticProps({ params }) {
-  const res = await fetch(
-    `https://fegoesim.com/wp-json/wp/v2/posts?slug=${params.slug}&_embed`
-  );
-  const posts = await res.json();
-
-  if (!posts[0]) return { notFound: true };
-  const post = posts[0];
-
-  // 抓第一個分類 ID（可依你需求調整為多分類）
-  const categoryId = post.categories?.[0];
-
-  let relatedPosts = [];
-  if (categoryId) {
-    const relRes = await fetch(
-      `https://fegoesim.com/wp-json/wp/v2/posts?categories=${categoryId}&exclude=${post.id}&per_page=6&_embed`
+  try {
+    // 單篇
+    const postRes = await fetch(
+      wp(`/wp/v2/posts?slug=${encodeURIComponent(params.slug)}&_embed`)
     );
-    relatedPosts = await relRes.json();
-  }
+    if (!postRes.ok) throw new Error(`Post fetch failed: ${postRes.status}`);
+    const posts = await postRes.json();
+    const post = posts?.[0];
+    if (!post) return { notFound: true, revalidate: 30 };
 
-  return {
-    props: {
-      post,
-      relatedPosts,
-    },
-    revalidate: 10,
-  };
+    // 同分類延伸
+    let relatedPosts = [];
+    const catId = post.categories?.[0];
+    if (catId) {
+      try {
+        const relRes = await fetch(
+          wp(
+            `/wp/v2/posts?categories=${catId}&exclude=${post.id}&per_page=6&_embed`
+          )
+        );
+        if (relRes.ok) relatedPosts = await relRes.json();
+      } catch {}
+    }
+
+    return {
+      props: { post, relatedPosts },
+      revalidate: 60, // 1 分鐘背景更新
+    };
+  } catch (e) {
+    // 來源掛掉時避免 500 讓整站 build 失敗
+    return { notFound: true, revalidate: 30 };
+  }
 }
