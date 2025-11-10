@@ -163,7 +163,7 @@ const RegisterForm = ({ onSuccess }) => {
           placeholder="請輸入帳號"
         />
 
-        <div className="flex gap-2">
+        <div className="flex sm:flex-row flex-col gap-2">
           <input
             required
             type="email"

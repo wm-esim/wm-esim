@@ -9,6 +9,16 @@ export const links = [
     href: "/setting",
      imgSrc: "/images/MenuToggle/02.jpg",
   },
+   {
+    title: "會員資訊",
+    href: "/account",
+    imgSrc: "/images/MenuToggle/03.jpg",
+  },
+   {
+    title: "購物車",
+    href: "/Cart",
+    imgSrc: "/images/MenuToggle/03.jpg",
+  },
   {
     title: "關於我們",
     href: "/about",

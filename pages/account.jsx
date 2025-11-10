@@ -362,7 +362,7 @@ const AccountPage = () => {
 
   return (
     <Layout>
-      <div className=" bg-[#f7f8f9] flex flex-col justify-center items-center">
+      <div className=" bg-[#f7f8f9] px-2 flex flex-col justify-center items-center">
         <div className="w-full py-20">
           <div className="dashdoard max-w-[1920px] w-[95%] xl:w-[85%] mx-auto py-8 2xl:py-20">
             {/* 麵包屑 */}

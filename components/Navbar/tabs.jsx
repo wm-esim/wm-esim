@@ -1,3 +1,4 @@
+// app/components/SlideTabsExample.jsx
 "use client";
 
 import { useUser } from "../../components/context/UserContext";
@@ -13,11 +14,11 @@ export const SlideTabsExample = () => {
 
   // Mobile 選單與滾動狀態
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [isMenuActive, setIsMenuActive] = useState(false);
+  const [isMenuActive, setIsMenuActive] = useState(false); // 保留給桌機 navbar 動畫用
   const [isScrollingUp, setIsScrollingUp] = useState(true);
   const lastScrollY = useRef(0);
 
-  // 直接從 Context 拿狀態（新版 UserContext 會首幀就帶入 localStorage 值）
+  // 使用者狀態
   const { userInfo, isHydrated, logout } = useUser();
 
   const navLinks = [
@@ -30,7 +31,7 @@ export const SlideTabsExample = () => {
     { label: "旅遊精選", href: "/blog" },
   ];
 
-  // 監聽滾動方向（顯示/隱藏導覽）
+  /* ============== 滾動方向（桌機 navbar 顯示/隱藏） ============== */
   useEffect(() => {
     const handleScroll = () => {
       const currentY = window.scrollY;
@@ -46,7 +47,23 @@ export const SlideTabsExample = () => {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // 登出（交給 Context 處理清理 & 同步），再導回首頁
+  /* ============== 手機選單開關：鎖定背景捲動 ============== */
+  useEffect(() => {
+    if (isMenuOpen) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = prev;
+      };
+    }
+  }, [isMenuOpen]);
+
+  // 同步 isMenuActive（保留你原本的桌機 navbar 動畫控制）
+  useEffect(() => {
+    setIsMenuActive(isMenuOpen);
+  }, [isMenuOpen]);
+
+  // 登出
   const handleLogout = () => {
     logout?.();
     router.push("/");
@@ -54,22 +71,7 @@ export const SlideTabsExample = () => {
 
   return (
     <>
-      {/* ✅ 手機選單背景遮罩 */}
-      <AnimatePresence>
-        {isMenuOpen && (
-          <motion.div
-            className="fixed inset-0 z-[900] pointer-events-none"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.3 }}
-          >
-            <div className="w-full h-full bg-white/30 backdrop-blur-md pointer-events-auto" />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ✅ Navbar：滾動時淡出/淡入 */}
+      {/* =================== 桌機版 Navbar（照舊） =================== */}
       <AnimatePresence mode="wait">
         {!isMenuActive && (
           <motion.div
@@ -121,9 +123,9 @@ export const SlideTabsExample = () => {
 
               {/* Right Side Icons */}
               <div className="w-[80%] md:w-[20%]">
-                <div className="flex items-center justify-center gap-4">
+                <div className="hidden md:flex items-center justify-center gap-4">
                   {/* Cart */}
-                  <Link href="/Cart" className="hidden md:flex">
+                  <Link href="/Cart">
                     <div className="flex items-center gap-2">
                       <span className="text-sm">Cart</span>
                       <img
@@ -134,48 +136,41 @@ export const SlideTabsExample = () => {
                     </div>
                   </Link>
 
-                  {/* Desktop User Info（以 Context + isHydrated 為準） */}
-                  <div className="hidden md:flex items-center gap-3">
-                    {!isHydrated ? (
-                      <div className="w-[140px] h-[24px] rounded bg-black/5 animate-pulse" />
-                    ) : userInfo ? (
-                      <>
-                        <Link
-                          href="/account"
-                          className="flex items-center gap-2"
-                        >
-                          <span className="text-sm">
-                            Hello, {userInfo.name}
-                          </span>
-                          <img
-                            src="/images/250721.jpg"
-                            alt="account-icon"
-                            className="w-[24px] h-[24px]"
-                          />
-                        </Link>
-                        <button
-                          onClick={handleLogout}
-                          className="hover:opacity-80 transition"
-                          title="登出"
-                        >
-                          <img
-                            src="/images/Nav/Logout--Streamline-Outlined-Material-Symbols.svg"
-                            alt="logout-icon"
-                            className="w-[24px] h-[24px]"
-                          />
-                        </button>
-                      </>
-                    ) : (
-                      <Link href="/login" className="flex items-center gap-2">
-                        <span className="text-sm">登入 / Account</span>
+                  {/* Desktop User Info */}
+                  {!isHydrated ? (
+                    <div className="w-[140px] h-[24px] rounded bg-black/5 animate-pulse" />
+                  ) : userInfo ? (
+                    <>
+                      <Link href="/account" className="flex items-center gap-2">
+                        <span className="text-sm">Hello, {userInfo.name}</span>
                         <img
-                          src="/images/0721_0.jpg"
+                          src="/images/250721.jpg"
                           alt="account-icon"
                           className="w-[24px] h-[24px]"
                         />
                       </Link>
-                    )}
-                  </div>
+                      <button
+                        onClick={handleLogout}
+                        className="hover:opacity-80 transition"
+                        title="登出"
+                      >
+                        <img
+                          src="/images/Nav/Logout--Streamline-Outlined-Material-Symbols.svg"
+                          alt="logout-icon"
+                          className="w-[24px] h-[24px]"
+                        />
+                      </button>
+                    </>
+                  ) : (
+                    <Link href="/login" className="flex items-center gap-2">
+                      <span className="text-sm">登入 / Account</span>
+                      <img
+                        src="/images/0721_0.jpg"
+                        alt="account-icon"
+                        className="w-[24px] h-[24px]"
+                      />
+                    </Link>
+                  )}
                 </div>
               </div>
 
@@ -185,56 +180,51 @@ export const SlideTabsExample = () => {
         )}
       </AnimatePresence>
 
-      {/* ✅ MenuToggle 固定右上角 → 僅手機顯示，避免覆蓋桌機按鈕 */}
-      <div className="fixed top-4 right-4 z-[1100] md:hidden">
-        <MenuToggle isActive={isMenuActive} setIsActive={setIsMenuActive} />
+      {/* =================== 手機版 Header（左 Logo / 右 漢堡） =================== */}
+      <div
+        className="
+          md:hidden
+          fixed inset-x-0 top-0
+          z-[2147483646]
+          bg-white/90 backdrop-blur
+          border-b border-black/5
+        "
+      >
+        <div
+          className="
+            flex items-center justify-between
+            px-4
+            pt-[calc(env(safe-area-inset-top,0px)+8px)]
+            pb-2
+          "
+        >
+          {/* 右：漢堡（沿用你的 MenuToggle，直接綁 isMenuOpen） */}
+          <div className="shrink-0">
+            <MenuToggle
+              isActive={isMenuOpen}
+              setIsActive={(next) => {
+                setIsMenuOpen(next);
+                setIsMenuActive(next); // 同步，避免桌機 navbar 動畫搶到
+              }}
+            />
+          </div>
+        </div>
       </div>
 
-      {/* ✅ Mobile 漢堡選單內容（選單開關 isMenuOpen 你自己的事件要記得觸發 setIsMenuOpen） */}
+      {/* 手機版：Header 佔位（避免內容被遮住） */}
+      <div className="md:hidden h-[calc(env(safe-area-inset-top,0px)+56px)]" />
+
+      {/* =================== 手機選單背景遮罩 =================== */}
       <AnimatePresence>
-        {isHydrated && isMenuOpen && (
+        {isMenuOpen && (
           <motion.div
-            initial={{ height: 0 }}
-            animate={{ height: "auto" }}
-            exit={{ height: 0 }}
-            className="md:hidden overflow-hidden px-4 pb-4 fixed top-[64px] left-0 right-0 z-[950] bg-[#3b57ff] text-white shadow-lg py-6 rounded-b-lg"
+            className="fixed inset-0 z-[2147483645] pointer-events-none md:hidden"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
           >
-            <div className="flex flex-col gap-4">
-              {navLinks.map((link) => (
-                <Link
-                  key={link.label}
-                  href={link.href}
-                  className="py-2 border-b border-white/20"
-                  onClick={() => setIsMenuOpen(false)}
-                >
-                  {link.label}
-                </Link>
-              ))}
-              {userInfo ? (
-                <>
-                  <span className="text-sm text-slate-200">
-                    Hello, {userInfo.name}
-                  </span>
-                  <button
-                    onClick={() => {
-                      handleLogout();
-                      setIsMenuOpen(false);
-                    }}
-                    className="px-3 py-1 bg-white text-[#3b57ff] rounded hover:bg-gray-100 transition"
-                  >
-                    登出
-                  </button>
-                </>
-              ) : (
-                <Link
-                  href="/login"
-                  className="px-3 py-1 bg-white text-[#3b57ff] rounded hover:bg-gray-100 transition"
-                  onClick={() => setIsMenuOpen(false)}
-                >
-                  登入
-                </Link>
-              )}
-            </div>
+            <div className="w-full h-full bg-black/25 backdrop-blur-sm pointer-events-auto" />
           </motion.div>
         )}
       </AnimatePresence>

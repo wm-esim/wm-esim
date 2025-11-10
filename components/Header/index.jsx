@@ -66,7 +66,9 @@ export default function MenuToggle({ isActive, setIsActive }) {
       >
         <AnimatePresence>{showNav && <Nav />}</AnimatePresence>
       </motion.div>
-      <Button isActive={isActive} toggleMenu={() => setIsActive(!isActive)} />
+      <div className="flex flex-row justify-between">
+        <Button isActive={isActive} toggleMenu={() => setIsActive(!isActive)} />
+      </div>
     </div>
   );
 }
