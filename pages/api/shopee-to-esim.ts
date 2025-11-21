@@ -1,43 +1,58 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import axios from "axios";
 import nodemailer from "nodemailer";
-import PLAN_ID_MAP from "../../lib/esim/planMap";
 
-const WC_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
-const CONSUMER_KEY = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
-const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
+// ✅ 改成 env（你 env 裡已經有）
+// WC
+const WC_API_URL = process.env.WC_API_URL || "https://fegoesim.com/wp-json/wc/v3/orders";
+const CONSUMER_KEY = process.env.WC_CONSUMER_KEY!;
+const CONSUMER_SECRET = process.env.WC_CONSUMER_SECRET!;
 
-const ESIM_PROXY_URL = "https://www.wmesim.com/api/esim/qrcode";
+// Gmail
+const GMAIL_USER = process.env.GMAIL_USER!;
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD!;
+
+function getSiteUrl(req: NextApiRequest) {
+  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
+  const proto =
+    (req.headers["x-forwarded-proto"] as string) ||
+    (req.headers.referer?.startsWith("http://") ? "http" : "https");
+  const host = req.headers.host;
+  return host ? `${proto}://${host}` : "http://localhost:3000";
+}
 
 async function sendEsimEmail(to: string, orderNo: string, html: string) {
   const transporter = nodemailer.createTransport({
     service: "gmail",
-    auth: {
-      user: "wandmesim@gmail.com",
-      pass: "hwoywmluqvsuluss",
-    },
+    auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
   });
 
-  const mailOptions = {
-    from: `"汪喵通SIM" <wandmesim@gmail.com>`,
+  await transporter.sendMail({
+    from: `"汪喵通SIM" <${GMAIL_USER}>`,
     to,
     subject: `訂單 ${orderNo} 的 eSIM QRCode`,
     html,
-  };
-
-  await transporter.sendMail(mailOptions);
+  });
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
   const { shopee_order_no, email } = req.body;
-  if (!shopee_order_no) return res.status(400).json({ error: "缺少 shopee_order_no" });
+  if (!shopee_order_no) {
+    return res.status(400).json({ error: "缺少 shopee_order_no" });
+  }
 
   try {
+    // ✅ 先用 search 縮小範圍（比抓 50 筆穩）
     const { data: orders } = await axios.get(WC_API_URL, {
       auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
-      params: { per_page: 50, orderby: "date", order: "desc" },
+      params: {
+        per_page: 20,
+        search: shopee_order_no,
+        orderby: "date",
+        order: "desc",
+      },
     });
 
     const order = orders.find((o: any) =>
@@ -72,75 +87,129 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!customerEmail) return res.status(400).json({ error: "無法取得 email" });
 
     const lineItems = fullOrder.line_items || [];
+    if (!lineItems.length) {
+      return res.status(400).json({ error: "訂單沒有 line_items" });
+    }
+
+    const siteUrl = getSiteUrl(req);
+    const ESIM_PROXY_URL = `${siteUrl}/api/esim/qrcode`;
+
     const htmlList: string[] = [];
+    const metaToAppend: any[] = []; // ✅ 統一累積 meta，最後一次寫入
+    const redeemErrors: any[] = [];
 
     for (const item of lineItems) {
-      const sku = item.sku || item.name;
-      const planId = PLAN_ID_MAP[sku] || sku;
+      const sku = (item.sku || "").trim();
+      const displayName = item.name || sku || "未命名商品";
       const quantity = item.quantity || 1;
 
-      const { data: esim } = await axios.post(ESIM_PROXY_URL, {
-        channel_dataplan_id: planId,
-        number: quantity,
-      });
+      if (!sku) {
+        redeemErrors.push({ sku: "", error: "line_item 缺少 sku" });
+        continue;
+      }
 
-      const imageList: string[] = Array.isArray(esim.qrcode)
-        ? esim.qrcode.map(String)
-        : [String(esim.qrcode)];
+      // ✅ 若之前部分成功過（有 meta），就跳過避免重複發卡
+      const alreadyHasQr = fullOrder.meta_data?.some(
+        (m: any) => m.key === `esim_qrcode_${sku}` && m.value
+      );
 
-      const qrcodeHtmlList = imageList.map((src, idx) => {
-        const imgTag = src.startsWith("http")
-          ? `<img src="${src}" style="max-width:300px" />`
-          : `<img src="data:image/png;base64,${src}" style="max-width:300px" />`;
-        return `<p><strong>${sku} - 第 ${idx + 1} 張</strong></p>${imgTag}`;
-      });
+      if (alreadyHasQr) {
+        htmlList.push(`<p><strong>${displayName}</strong>：此 SKU 已有 QRCode，跳過重複兌換。</p>`);
+        continue;
+      }
 
-      htmlList.push(qrcodeHtmlList.join("<br/>"));
+      try {
+        // ✅ 送 planId=sku，讓 qrcode.ts 自己走 Supabase mapping
+        const { data: esim } = await axios.post(
+          ESIM_PROXY_URL,
+          { planId: sku, number: quantity },
+          { timeout: 20000 }
+        );
 
-      // 寫入每個 SKU 對應的 QRCode meta
+        const imageList: string[] = Array.isArray(esim.qrcode)
+          ? esim.qrcode.map(String)
+          : [String(esim.qrcode)];
+
+        const qrcodeHtmlList = imageList.map((src, idx) => {
+          const imgTag = src.startsWith("http")
+            ? `<img src="${src}" style="max-width:300px" />`
+            : `<img src="data:image/png;base64,${src}" style="max-width:300px" />`;
+          return `<p><strong>${displayName} - 第 ${idx + 1} 張</strong></p>${imgTag}`;
+        });
+
+        htmlList.push(qrcodeHtmlList.join("<br/>"));
+
+        // ✅ 累積 meta（最後一起寫）
+        metaToAppend.push(
+          { key: `esim_plan_sku_${sku}`, value: sku },
+          { key: `esim_topup_id_${sku}`, value: String(esim.topup_id || "") },
+          { key: `esim_qrcode_${sku}`, value: imageList.join(",") }
+        );
+
+        // ✅ 寫入訂單備註（顯示 QRCode）
+        await axios.post(
+          `${WC_API_URL}/${orderId}/notes`,
+          {
+            note: qrcodeHtmlList.join("<br/>"),
+            customer_note: true,
+          },
+          { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+        );
+      } catch (e: any) {
+        const upstream = e?.response?.data || e.message;
+        redeemErrors.push({ sku, error: upstream });
+
+        htmlList.push(
+          `<p><strong>${displayName}</strong> 兌換失敗：${JSON.stringify(upstream)}</p>`
+        );
+      }
+    }
+
+    // ✅ 先把成功/失敗紀錄寫回訂單（一次 PUT）
+    if (metaToAppend.length || redeemErrors.length) {
+      const metaAll = [
+        ...(fullOrder.meta_data || []),
+        ...metaToAppend,
+        ...(redeemErrors.length
+          ? [{ key: "esim_redeem_failed", value: JSON.stringify(redeemErrors) }]
+          : []),
+      ];
+
+      await axios.put(
+        `${WC_API_URL}/${orderId}`,
+        { meta_data: metaAll },
+        { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
+      );
+    }
+
+    // ✅ 寄信（包含成功+失敗的 html）
+    await sendEsimEmail(customerEmail, shopee_order_no, htmlList.join("<hr/>"));
+
+    // ✅ 若全部成功才標 redeemed + completed
+    if (redeemErrors.length === 0) {
       await axios.put(
         `${WC_API_URL}/${orderId}`,
         {
+          status: "completed",
           meta_data: [
-            { key: `esim_plan_id_${sku}`, value: planId },
-            { key: `esim_qrcode_${sku}`, value: imageList.join(",") },
+            ...(fullOrder.meta_data || []),
+            { key: "esim_qrcode_redeemed", value: "yes" },
           ],
-        },
-        { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-      );
-
-      // 寫入訂單備註（顯示 QRCode）
-      await axios.post(
-        `${WC_API_URL}/${orderId}/notes`,
-        {
-          note: qrcodeHtmlList.join("<br/>"),
-          customer_note: true,
         },
         { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
       );
     }
 
-    // 發送 Email
-    await sendEsimEmail(customerEmail, shopee_order_no, htmlList.join("<hr/>"));
-
-    // ✅ 更新訂單為已完成，並寫入兌換紀錄
-    await axios.put(
-      `${WC_API_URL}/${orderId}`,
-      {
-        status: "completed",
-        meta_data: [
-          { key: "esim_qrcode_redeemed", value: "yes" },
-        ],
-      },
-      { auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET } }
-    );
-
     return res.status(200).json({
-      success: true,
-      message: "已處理並寄送 QRCode，訂單已完成",
+      success: redeemErrors.length === 0,
+      message:
+        redeemErrors.length === 0
+          ? "已處理並寄送 QRCode，訂單已完成"
+          : "部分 SKU 兌換失敗，已寄送成功項目並寫入失敗原因",
+      redeemErrors: redeemErrors.length ? redeemErrors : undefined,
     });
   } catch (err: any) {
     console.error("❌ 發生錯誤：", err?.response?.data || err.message);
-    return res.status(500).json({ error: "系統錯誤" });
+    return res.status(500).json({ error: "系統錯誤", detail: err?.response?.data || err.message });
   }
 }

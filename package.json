@@ -29,6 +29,7 @@
     "@react-three/fiber": "8.12.1",
     "@studio-freight/lenis": "^1.0.28",
     "@studio-freight/react-lenis": "^0.0.47",
+    "@supabase/supabase-js": "^2.78.0",
     "@tabler/icons-react": "^3.30.0",
     "@tailwindcss/postcss": "^4.0.8",
     "@types/react": "^18.2.7",
