@@ -129,7 +129,7 @@ export const SlideTabsExample = () => {
                     <div className="flex items-center gap-2">
                       <span className="text-sm">Cart</span>
                       <img
-                        src="https://isetan.mistore.jp/on/demandware.static/-/Sites-eGift-Library/ja_JP/dw97e3b6f2/assets/images/common/icon-cart.svg"
+                        src="/images/shopping-cart.png"
                         alt="cart-icon"
                         className="w-[24px] h-[24px]"
                       />
