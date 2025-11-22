@@ -12,33 +12,40 @@ export default function ShopeeQRCodePage() {
     setMessage("");
 
     try {
-      const res = await fetch("/api/shopee-to-esim", {
+      // ✅ 直接用「帶尾斜線」避免 Next 308 redirect
+      const res = await fetch("/api/shopee-to-esim/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shopee_order_no: orderNo, email }),
+        body: JSON.stringify({
+          shopee_order_no: orderNo.trim(),
+          email: email.trim(),
+        }),
       });
 
-      const data = await res.json();
+      const text = await res.text();
+      let data: any = {};
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // 不是 JSON 就直接丟出去
+        throw new Error(text || "Server returned non-JSON response");
+      }
+
+      if (!res.ok) {
+        throw new Error(data?.error || data?.message || "API error");
+      }
 
       if (data?.alreadyRedeemed) {
-        setMessage(
-          "\u26a0\ufe0f \u6b64\u8a02\u55ae\u5df2\u5b8c\u6210\u514c\u63db\uff0c\u7121\u9700\u518d\u6b21\u63d0\u4ea4\u3002\u5982\u6709\u554f\u984c\u8acb\u806f\u7d61\u6211\u5011"
-        );
+        setMessage("⚠️ 此訂單已完成兌換，無需再次提交。如有問題請聯絡我們");
       } else if (data?.success) {
-        setMessage(
-          "\u2705 \u5df2\u6210\u529f\u7522\u751f QRCode \u4e26\u5bc4\u9001\u81f3\u4fe1\u7bb1\uff01"
-        );
+        setMessage("✅ 已成功產生 QRCode 並寄送至信箱！");
       } else {
         setMessage(
-          `\u274c \u767c\u751f\u932f\u8aa4\uff1a${
-            data?.error || data?.message || "\u8acb\u7a0d\u5f8c\u518d\u8a66"
-          }`
+          `❌ 發生錯誤：${data?.error || data?.message || "請稍後再試"}`
         );
       }
-    } catch (error) {
-      setMessage(
-        "\u274c \u7cfb\u7d71\u932f\u8aa4\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66\u3002"
-      );
+    } catch (error: any) {
+      setMessage(`❌ 系統錯誤：${error?.message || "請稍後再試"}`);
     }
 
     setLoading(false);
@@ -97,16 +104,16 @@ export default function ShopeeQRCodePage() {
             )}
           </div>
         </div>
+
+        {/* 右側 INFO 你原本的內容保持不動 */}
         <div className="w-full lg:w-[40%] mx-auto p-6 mt-10 rounded-lg shadow-md bg-white">
           <div>
             <h2>INFO</h2>
-            <div>
-              <p>
-                提供蝦皮訂單購買的 eSIM
-                商品進行兌換使用。請輸入您的蝦皮訂單編號與有效的收件信箱，我們將會產生對應的
-                eSIM QRCode 並寄送至您的信箱。
-              </p>
-            </div>
+            <p>
+              提供蝦皮訂單購買的 eSIM
+              商品進行兌換使用。請輸入您的蝦皮訂單編號與有效的收件信箱，
+              我們將會產生對應的 eSIM QRCode 並寄送至您的信箱。
+            </p>
             <div className="py-3">
               <ul className="list-disc pl-5 space-y-2 text-gray-700">
                 <li>
@@ -125,12 +132,10 @@ export default function ShopeeQRCodePage() {
                 </li>
               </ul>
             </div>
-            <div>
-              <p className="text-sm">
-                每筆訂單僅能兌換一次，若系統偵測此訂單已產生過
-                QRCode，將不會重複處理與寄信。 如有問題請聯絡我們
-              </p>
-            </div>
+            <p className="text-sm">
+              每筆訂單僅能兌換一次，若系統偵測此訂單已產生過 QRCode，
+              將不會重複處理與寄信。 如有問題請聯絡我們
+            </p>
           </div>
         </div>
       </div>
