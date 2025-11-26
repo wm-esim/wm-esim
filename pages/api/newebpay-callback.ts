@@ -4,16 +4,14 @@ import type { IncomingMessage } from "http";
 import crypto from "crypto";
 import qs from "qs";
 
-// ★★★ 定義兩組金鑰 (自動輪詢) ★★★
+// 定義兩組金鑰 (自動輪詢)
 const KEY_SETS = [
   {
-    // 第一組：寫在 order.ts 裡的那組 (目前最可能是這組)
     key: "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx",
     iv:  "PKetlaZYZcZvlMmC",
     name: "Hardcoded-MS3788"
   },
   {
-    // 第二組：Vercel 環境變數裡的那組 (備用)
     key: "pwFHCqoQZGmho4w6",
     iv:  "EkRm7iFT261dpevs",
     name: "Env-3002607"
@@ -36,40 +34,57 @@ function sha(encrypted: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 
-/** 解密核心 */
+// ★★★ 強壯版解密函式：自動嘗試多種格式 ★★★
 function decryptTradeInfo(ti: string, key: string, iv: string): string {
-  const tryHex = () => {
-    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), Buffer.from(iv));
-    d.setAutoPadding(true);
-    let out = d.update(ti, "hex", "utf8");
-    out += d.final("utf8");
-    return out;
-  };
-  const tryB64 = () => {
-    const norm = ti.replace(/\s+/g, "+").replace(/-/g, "+").replace(/_/g, "/");
-    const padded = norm + "===".slice((norm.length + 3) % 4);
-    const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), Buffer.from(iv));
-    d.setAutoPadding(true);
-    let out = d.update(padded, "base64", "utf8");
-    out += d.final("utf8");
-    return out;
-  };
+  // 1. 定義各種可能的格式處理方式
+  const attempts = [
+    (t: string) => t, // 原文
+    (t: string) => t.replace(/\s/g, "+"), // 修復空白
+    (t: string) => decodeURIComponent(t), // URL Decode
+    (t: string) => decodeURIComponent(t).replace(/\s/g, "+") // 混合
+  ];
 
-  if (/^[0-9a-fA-F]+$/.test(ti) && ti.length % 2 === 0) {
-    try { return tryHex(); } catch { return tryB64(); }
+  let lastError: any = null;
+
+  for (const modify of attempts) {
+    const candidate = modify(ti);
+    
+    // 嘗試 Hex 解密
+    try {
+      const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), Buffer.from(iv));
+      d.setAutoPadding(true);
+      let out = d.update(candidate, "hex", "utf8");
+      out += d.final("utf8");
+      // 簡單驗證解出來是不是 JSON 或 QueryString
+      if (out.includes("{") || out.includes("=")) return out; 
+    } catch (e) { lastError = e; }
+
+    // 嘗試 Base64 解密
+    try {
+      const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), Buffer.from(iv));
+      d.setAutoPadding(true);
+      let out = d.update(candidate, "base64", "utf8");
+      out += d.final("utf8");
+      if (out.includes("{") || out.includes("=")) return out;
+    } catch (e) { lastError = e; }
   }
-  try { return tryB64(); } catch { return tryHex(); }
+
+  // 如果都失敗，拋出最後一個錯誤
+  throw lastError || new Error("Decrypt failed with all attempts");
 }
 
 function parseDecrypted(text: string): any {
+  // 移除可能存在的 Padding 亂碼 (雖有 autoPadding，但有時會有殘留)
+  const cleanText = text.replace(/[\x00-\x1F\x7F-\x9F]/g, ""); 
+  
   try {
-    const obj = JSON.parse(text);
+    const obj = JSON.parse(cleanText);
     if (obj && typeof obj.Result === "string") {
       try { obj.Result = JSON.parse(obj.Result); } catch { obj.Result = qs.parse(obj.Result); }
     }
     return obj;
   } catch {
-    const r: any = qs.parse(text);
+    const r: any = qs.parse(cleanText);
     if (r?.Result && typeof r.Result === "string") {
       try { r.Result = JSON.parse(r.Result); } catch { r.Result = qs.parse(r.Result); }
     }
@@ -118,27 +133,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.redirect(302, `/thank-you?status=error&msg=MissingParams`);
     }
 
-    // 候選字串
-    const tiCandidates = (() => {
-      const out: string[] = [];
-      const hasPct = /%[0-9a-fA-F]{2}/.test(TI_raw);
-      out.push(TI_raw);
-      if (hasPct) { try { out.push(decodeURIComponent(TI_raw)); } catch {} }
-      if (!hasPct && /\s/.test(TI_raw)) {
-        const restored = TI_raw.replace(/\s/g, "+");
-        out.push(restored);
-        try { out.push(decodeURIComponent(restored)); } catch {}
-      }
-      return Array.from(new Set(out.filter(Boolean)));
-    })();
-
-    // ★★★ 核心修改：輪詢所有金鑰，直到解開為止 ★★★
+    // SHA 驗證 (尋找正確金鑰)
     let validKeySet = null;
     let TradeInfo = "";
 
-    // 1. 先找哪組 Key 能通過 SHA 驗證
+    // 準備多種格式的 TradeInfo 候選人
+    const tiCandidates = [
+        TI_raw,
+        decodeURIComponent(TI_raw),
+        TI_raw.replace(/\s/g, "+"),
+        decodeURIComponent(TI_raw).replace(/\s/g, "+")
+    ];
+    // 去重複
+    const uniqueCandidates = Array.from(new Set(tiCandidates));
+
     for (const set of KEY_SETS) {
-      for (const cand of tiCandidates) {
+      for (const cand of uniqueCandidates) {
+        // console.log(`Checking SHA with key ${set.name}...`); // debug 用
         if (sha(cand, set.key, set.iv) === TS_raw) {
           validKeySet = set;
           TradeInfo = cand;
@@ -150,18 +161,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!validKeySet || !TradeInfo) {
       console.error("所有金鑰皆無法通過 SHA 驗證");
-      return res.redirect(302, `/thank-you?status=error&msg=ShaMismatch_AllKeysFailed`);
+      return res.redirect(302, `/thank-you?status=error&msg=ShaMismatch`);
     }
 
-    console.log(`✅ 使用金鑰組 [${validKeySet.name}] 驗證成功`);
+    console.log(`✅ [Callback] 使用金鑰 [${validKeySet.name}] 驗證成功，準備解密...`);
 
-    // 2. 解密
+    // 解密
     let payload: any = {};
     try {
       const plain = decryptTradeInfo(TradeInfo, validKeySet.key, validKeySet.iv);
+      console.log("✅ 解密成功 (前20字):", plain.slice(0, 20));
       payload = parseDecrypted(plain) || {};
-    } catch {
-      return res.redirect(302, `/thank-you?status=error&msg=DecryptFail`);
+    } catch (e: any) {
+      console.error("❌ 解密失敗:", e.message);
+      // 把錯誤訊息帶回前端，方便看
+      return res.redirect(302, `/thank-you?status=error&msg=DecryptFail_${e.message.replace(/\s/g, '_')}`);
     }
 
     const status = (payload?.Status as string) || (body?.Status as string) || "FAIL";
