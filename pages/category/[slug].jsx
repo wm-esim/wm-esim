@@ -9,77 +9,92 @@ import SwiperCarousel from "../../components/SwiperCarousel/SwiperCard.jsx";
 import FilterSideBar from "../../components/FilterSideBar";
 import { motion } from "framer-motion";
 
-// --- 環境變數設定 ---
+// --- 環境變數 ---
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
   "https://www.wmesim.com";
-
 const WC_BASE =
   process.env.NEXT_PUBLIC_WP_API_BASE_URL?.replace(/\/+$/, "") ||
   "https://fegoesim.com";
-
-// 優先使用環境變數，若無則使用預設值
 const WC_KEY =
   process.env.WC_CONSUMER_KEY ||
   process.env.NEXT_PUBLIC_WC_CONSUMER_KEY ||
   "ck_ef9f4379124655ad946616864633bd37e3174bc2";
-
 const WC_SECRET =
   process.env.WC_CONSUMER_SECRET ||
   process.env.NEXT_PUBLIC_WC_CONSUMER_SECRET ||
   "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
-// --- 關鍵修復：定義請求標頭 (User-Agent) ---
-// 這是防止被 WordPress 防火牆擋下的關鍵
+// 偽裝 Header
 const API_HEADERS = {
   "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "Content-Type": "application/json",
 };
 
-// --- getStaticPaths ---
 export async function getStaticPaths() {
-  // ★★★ 修復重點 ★★★
-  // 我們不再預先抓取所有分類路徑，因為這會在部署時瞬間產生大量請求，導致 WordPress 封鎖 IP。
-  // 改成回傳空陣列，讓頁面在「第一次被使用者訪問時」才生成 (fallback: 'blocking')。
-  // 這樣既能保證部署 100% 成功，又能避免 404。
+  // 保持空路徑，避免部署時瞬間併發請求導致被鎖 IP
   return {
     paths: [],
     fallback: "blocking",
   };
 }
 
-// --- getStaticProps ---
 export async function getStaticProps({ params }) {
   const { slug } = params;
 
+  // 初始化錯誤訊息容器
+  let debugInfo = {
+    step: "init",
+    errorMsg: null,
+    fetchedCategories: [],
+  };
+
   try {
-    // 1. 先抓所有分類來比對 ID
+    // 1. 抓取分類
+    debugInfo.step = "fetching_categories";
     const catRes = await fetch(
       `${WC_BASE}/wp-json/wc/v3/products/categories?per_page=100&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`,
-      { headers: API_HEADERS } // 加入 Header
+      { headers: API_HEADERS }
     );
 
     if (!catRes.ok) {
-      throw new Error(`Categories fetch failed: ${catRes.statusText}`);
+      throw new Error(
+        `分類 API 回傳錯誤: ${catRes.status} ${catRes.statusText}`
+      );
     }
 
     const categories = await catRes.json();
+    debugInfo.fetchedCategories = categories.map((c) => c.slug); // 紀錄抓到了哪些分類
+
     const matchedCategory = categories.find((c) => c.slug === slug);
 
     if (!matchedCategory) {
-      console.warn(`找不到分類 Slug: ${slug}`);
-      return { notFound: true };
+      // 找不到分類時，不回傳 404，改回傳錯誤訊息以便除錯
+      return {
+        props: {
+          slug,
+          categories: [],
+          initialProducts: [],
+          hasError: true,
+          errorMessage: `找不到分類: ${slug}`,
+          debugDetails: JSON.stringify(debugInfo),
+        },
+        revalidate: 10,
+      };
     }
 
-    // 2. 根據 ID 抓產品
+    // 2. 抓取產品
+    debugInfo.step = "fetching_products";
     const prodRes = await fetch(
       `${WC_BASE}/wp-json/wc/v3/products?category=${matchedCategory.id}&per_page=50&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`,
-      { headers: API_HEADERS } // 加入 Header
+      { headers: API_HEADERS }
     );
 
     if (!prodRes.ok) {
-      throw new Error(`Products fetch failed: ${prodRes.statusText}`);
+      throw new Error(
+        `產品 API 回傳錯誤: ${prodRes.status} ${prodRes.statusText}`
+      );
     }
 
     const data = await prodRes.json();
@@ -89,60 +104,110 @@ export async function getStaticProps({ params }) {
         slug,
         categories,
         initialProducts: data,
+        hasError: false,
       },
-      revalidate: 60, // 每 60 秒重新驗證一次
+      revalidate: 60,
     };
   } catch (e) {
-    console.error(`❌ getStaticProps Error [${slug}]:`, e);
-    // 如果連線失敗，不要直接回傳 404，這樣使用者還有機會看到錯誤訊息或重試
-    // 但為了標準流程，這裡若失敗還是回傳 notFound 或是一個錯誤狀態
-    return { notFound: true, revalidate: 10 };
+    console.error(`❌ getStaticProps 失敗 [${slug}]:`, e);
+    // ★★★ 關鍵修改：發生嚴重錯誤時，不回傳 notFound，而是回傳錯誤內容到畫面 ★★★
+    return {
+      props: {
+        slug,
+        categories: [],
+        initialProducts: [],
+        hasError: true,
+        errorMessage: e.message || "未知伺服器錯誤",
+        debugDetails: JSON.stringify({ ...debugInfo, errorStack: e.stack }),
+      },
+      revalidate: 10,
+    };
   }
 }
 
-const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
+const CategoryPage = ({
+  slug,
+  categories,
+  initialProducts = [],
+  hasError,
+  errorMessage,
+  debugDetails,
+}) => {
   const router = useRouter();
-
-  // 為了安全起見，如果 initialProducts 是空的或 undefined，給個空陣列
-  const safeInitialProducts = Array.isArray(initialProducts)
-    ? initialProducts
-    : [];
-
-  const [fetchedProducts, setFetchedProducts] = useState(safeInitialProducts);
-  const [filteredProducts, setFilteredProducts] = useState(safeInitialProducts);
+  const [fetchedProducts, setFetchedProducts] = useState(initialProducts || []);
+  const [filteredProducts, setFilteredProducts] = useState(
+    initialProducts || []
+  );
   const [activeTags, setActiveTags] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const PRODUCTS_PER_PAGE = 12;
 
-  // 當 slug 改變時，Client 端重新抓取 (非必要，因為 getStaticProps 已經抓了，但保留你的邏輯)
+  // --- ★★★ 錯誤顯示畫面 (除錯用) ★★★ ---
+  if (hasError) {
+    return (
+      <Layout>
+        <div className="min-h-screen flex flex-col items-center justify-center p-10 bg-gray-100">
+          <div className="bg-white p-8 rounded-xl shadow-lg max-w-2xl w-full border-l-4 border-red-500">
+            <h1 className="text-2xl font-bold text-red-600 mb-4">
+              系統抓取失敗 (Debug Mode)
+            </h1>
+            <p className="text-lg font-semibold text-gray-800 mb-2">
+              錯誤原因：
+            </p>
+            <code className="block bg-red-50 p-3 rounded text-red-800 mb-4 font-mono">
+              {errorMessage}
+            </code>
+
+            <p className="text-sm font-semibold text-gray-600 mb-2">
+              詳細診斷資訊：
+            </p>
+            <pre className="bg-gray-800 text-green-400 p-4 rounded overflow-auto text-xs max-h-60">
+              {debugDetails}
+            </pre>
+
+            <div className="mt-6 flex gap-4">
+              <button
+                onClick={() => router.reload()}
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+              >
+                重新整理
+              </button>
+              <Link
+                href="/"
+                className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600"
+              >
+                回首頁
+              </Link>
+            </div>
+          </div>
+        </div>
+      </Layout>
+    );
+  }
+
+  // --- 正常的 Component 邏輯 ---
   useEffect(() => {
+    // 只有當 categories 存在且不為空時才執行
     if (!categories || categories.length === 0) return;
 
     const matchedCategory = categories.find((cat) => cat.slug === slug);
     if (!matchedCategory) return;
 
-    // 如果 initialProducts 已經有資料且符合當前 slug，就不需要重抓，節省效能
-    // 這裡保留你的邏輯，但建議可以判斷一下是否真的需要重抓
-
+    // 如果 initialProducts 已經有資料，就不一定要重抓，這裡保留你的邏輯
     const fetchProducts = async () => {
       try {
         const res = await fetch(
           `${WC_BASE}/wp-json/wc/v3/products?category=${matchedCategory.id}&per_page=50&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
         );
         const data = await res.json();
-        if (Array.isArray(data)) {
-          setFetchedProducts(data);
-        }
+        setFetchedProducts(data);
       } catch (err) {
-        console.error("Client side fetch error:", err);
+        console.error("Client fetch error", err);
       }
     };
-
-    // 只有當初始資料不匹配或需要更新時才執行 (這裡簡單處理直接執行)
     fetchProducts();
-  }, [slug, categories]); // 移除 WC_KEY 依賴，避免不必要的重跑
+  }, [slug, categories]);
 
-  // 更新 Filter 邏輯
   useEffect(() => {
     const tagsFromQuery = router.query.tags?.split(",").filter(Boolean) || [];
     setActiveTags(tagsFromQuery);
@@ -163,17 +228,12 @@ const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
       });
       setFilteredProducts(filtered);
     }
-    // Filter 改變時重置頁碼
-    setCurrentPage(1);
   }, [activeTags, fetchedProducts]);
 
   const startIndex = (currentPage - 1) * PRODUCTS_PER_PAGE;
   const endIndex = startIndex + PRODUCTS_PER_PAGE;
   const currentProducts = filteredProducts.slice(startIndex, endIndex);
   const totalPages = Math.ceil(filteredProducts.length / PRODUCTS_PER_PAGE);
-
-  // 若資料讀取中或發生錯誤的 fallback (防止頁面崩潰)
-  if (!categories) return <div className="p-10 text-center">Loading...</div>;
 
   return (
     <Layout>
@@ -203,8 +263,7 @@ const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
               <div className="bread_crumb w-full">
                 <a href="/">Home</a> ←{" "}
                 <span className="text-[16px]">
-                  {categories.find((c) => c.slug === slug)?.name ||
-                    "All Products"}
+                  {categories?.find((c) => c.slug === slug)?.name || slug}
                 </span>
               </div>
               <CountryFilter />
@@ -268,7 +327,7 @@ const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
               </div>
             ) : (
               <div className="text-center text-gray-500 p-10">
-                沒有相關產品 (或無法連接伺服器)。
+                沒有相關產品。
               </div>
             )}
 
