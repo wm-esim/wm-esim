@@ -9,74 +9,81 @@ import SwiperCarousel from "../../components/SwiperCarousel/SwiperCard.jsx";
 import FilterSideBar from "../../components/FilterSideBar";
 import { motion } from "framer-motion";
 
-const CATEGORY_API_URL = `https://fegoesim.com/wp-json/wc/v3/products/categories?consumer_key=ck_ef9f4379124655ad946616864633bd37e3174bc2&consumer_secret=cs_3da596e08887d9c7ccbf8ee15213f83866c160d4&per_page=100`;
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+  "https://www.wmesim.com";
+const WC_BASE =
+  process.env.NEXT_PUBLIC_WP_API_BASE_URL?.replace(/\/+$/, "") ||
+  "https://fegoesim.com";
+const WC_KEY =
+  process.env.WC_CONSUMER_KEY || "ck_ef9f4379124655ad946616864633bd37e3174bc2";
+const WC_SECRET =
+  process.env.WC_CONSUMER_SECRET ||
+  "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
+const WC_API = (p) =>
+  `${WC_BASE}/wp-json/wc/v3${p}&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`;
 
 export async function getStaticPaths() {
-  const categoryRes = await fetch(CATEGORY_API_URL);
-  const categories = await categoryRes.json();
-
-  const paths = categories.map((cat) => ({
-    params: { slug: cat.slug },
-  }));
-
-  return { paths, fallback: "blocking" };
+  try {
+    const res = await fetch(
+      `${WC_BASE}/wp-json/wc/v3/products/categories?per_page=100&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
+    );
+    const cats = await res.json();
+    const paths = cats.map((c) => ({ params: { slug: c.slug } }));
+    return { paths, fallback: "blocking" };
+  } catch (e) {
+    console.error("⚠️ getStaticPaths fail:", e);
+    return { paths: [], fallback: "blocking" };
+  }
 }
 
 export async function getStaticProps({ params }) {
   try {
-    const categoryRes = await fetch(CATEGORY_API_URL);
-    const categories = await categoryRes.json();
+    const res = await fetch(
+      `${WC_BASE}/wp-json/wc/v3/products/categories?per_page=100&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
+    );
+    const categories = await res.json();
 
-    const matchedCategory = categories.find((cat) => cat.slug === params.slug);
+    const matchedCategory = categories.find((c) => c.slug === params.slug);
     if (!matchedCategory) return { notFound: true };
 
-    const productRes = await fetch(
-      `https://fegoesim.com/wp-json/wc/v3/products?category=${matchedCategory.id}&consumer_key=...&consumer_secret=...`
+    const prodRes = await fetch(
+      `${WC_BASE}/wp-json/wc/v3/products?category=${matchedCategory.id}&per_page=50&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
     );
-    const data = await productRes.json();
+    const data = await prodRes.json();
 
     return {
-      props: {
-        slug: params.slug,
-        categories,
-        initialProducts: data,
-      },
-      revalidate: 10,
+      props: { slug: params.slug, categories, initialProducts: data },
+      revalidate: 60,
     };
   } catch (e) {
-    console.error("❌ ISR 錯誤：", e);
-    return { notFound: true };
+    console.error("❌ getStaticProps fail:", e);
+    return { notFound: true, revalidate: 30 };
   }
 }
 
-const CategoryPage = ({ slug, categories }) => {
+const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
   const router = useRouter();
-  const [fetchedProducts, setFetchedProducts] = useState([]);
-  const [filteredProducts, setFilteredProducts] = useState([]);
+  const [fetchedProducts, setFetchedProducts] = useState(initialProducts);
+  const [filteredProducts, setFilteredProducts] = useState(initialProducts);
   const [activeTags, setActiveTags] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const PRODUCTS_PER_PAGE = 12;
 
   useEffect(() => {
     const matchedCategory = categories.find((cat) => cat.slug === slug);
-    if (!matchedCategory) {
-      setFetchedProducts([]);
-      return;
-    }
-
+    if (!matchedCategory) return;
     const fetchProducts = async () => {
       try {
         const res = await fetch(
-          `https://fegoesim.com/wp-json/wc/v3/products?category=${matchedCategory.id}&consumer_key=ck_ef9f4379124655ad946616864633bd37e3174bc2&consumer_secret=cs_3da596e08887d9c7ccbf8ee15213f83866c160d4`
+          `${WC_BASE}/wp-json/wc/v3/products?category=${matchedCategory.id}&per_page=50&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
         );
         const data = await res.json();
         setFetchedProducts(data);
       } catch (err) {
         console.error("抓分類產品失敗", err);
-        setFetchedProducts([]);
       }
     };
-
     fetchProducts();
   }, [slug, categories]);
 
@@ -86,7 +93,7 @@ const CategoryPage = ({ slug, categories }) => {
   }, [router.query.tags]);
 
   useEffect(() => {
-    if (!activeTags || activeTags.length === 0) {
+    if (!activeTags.length) {
       setFilteredProducts(fetchedProducts);
     } else {
       const filtered = fetchedProducts.filter((product) => {
@@ -94,7 +101,7 @@ const CategoryPage = ({ slug, categories }) => {
           product.tags?.some((t) => t.slug === tag || t.name === tag)
         );
         const categoryMatch = activeTags.every((tag) =>
-          product.categories?.some((cat) => cat.slug === tag)
+          product.categories?.some((c) => c.slug === tag)
         );
         return tagMatch || categoryMatch;
       });
@@ -131,11 +138,11 @@ const CategoryPage = ({ slug, categories }) => {
           </div>
 
           <div className="bottom-content mt-[30px] rounded-xl overflow-hidden w-full lg:w-[75%] flex flex-col">
-            <div className="top-navgation bg-white max-w-[1920px]  border-b border-gray-200 py-5 flex flex-col sm:flex-row items-center pl-4 sm:pl-10">
+            <div className="top-navgation bg-white border-b border-gray-200 py-5 flex flex-col sm:flex-row items-center pl-4 sm:pl-10">
               <div className="bread_crumb w-full">
                 <a href="/">Home</a> ←{" "}
                 <span className="text-[16px]">
-                  {categories.find((cat) => cat.slug === slug)?.name ||
+                  {categories.find((c) => c.slug === slug)?.name ||
                     "All Products"}
                 </span>
               </div>
@@ -145,20 +152,18 @@ const CategoryPage = ({ slug, categories }) => {
             {currentProducts.length > 0 ? (
               <div className="grid grid-cols-1 bg-white rounded-bl-xl rounded-br-xl sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6 p-2 sm:p-6">
                 {currentProducts.map((product, index) => {
-                  const match = product?.description?.match(
+                  const imgMatch = product.description?.match(
                     /<img[^>]+src=\"([^">]+)\"/
                   );
-                  const extractedImg = match?.[1];
+                  const extractedImg = imgMatch?.[1];
                   const productImage =
-                    product?.images?.[0]?.src ||
+                    product.images?.[0]?.src ||
                     extractedImg ||
                     "/default-image.jpg";
 
                   const price =
-                    product?.prices?.sale_price ||
-                    product?.prices?.price ||
-                    null;
-                  const regularPrice = product?.prices?.regular_price || null;
+                    product.prices?.sale_price || product.prices?.price;
+                  const regular = product.prices?.regular_price;
 
                   return (
                     <motion.div
@@ -168,11 +173,7 @@ const CategoryPage = ({ slug, categories }) => {
                       transition={{ duration: 0.5, delay: index * 0.05 }}
                       className="group"
                     >
-                      <Link
-                        href={`/product/${product.slug}`}
-                        prefetch={false}
-                        className="hover:scale-105 duration-200 block"
-                      >
+                      <Link href={`/product/${product.slug}`} prefetch={false}>
                         <div className="card overflow-hidden rounded-xl p-4 bg-white">
                           <Image
                             src={productImage}
@@ -187,8 +188,8 @@ const CategoryPage = ({ slug, categories }) => {
                           <div className="text-gray-700">
                             {price ? (
                               <>
-                                {regularPrice && (
-                                  <del className="mr-1">NT${regularPrice}</del>
+                                {regular && (
+                                  <del className="mr-1">NT${regular}</del>
                                 )}
                                 NT${price}
                               </>

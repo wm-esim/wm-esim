@@ -106,7 +106,7 @@ export default function PostPage({ post, relatedPosts = [] }) {
               &gt; <span>{post.title.rendered}</span>
             </span>
             <span>
-              最後更新時間：dfdsfdsfdsf
+              最後更新時間：
               {new Date(post.modified).toLocaleDateString("zh-TW")}
             </span>
           </div>
