@@ -56,7 +56,9 @@ export default function ThankYouPage() {
 
     const fetchQrcode = async () => {
       try {
-        const res = await axios.get("/api/get-qrcode", { params: { orderNo } });
+        const res = await axios.get("/api/fetch-order", {
+          params: { orderNo },
+        });
         const { qrcodes, orderInfo } = res.data ?? {};
 
         setOrderInfo(orderInfo || null);
@@ -79,7 +81,7 @@ export default function ThankYouPage() {
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-20">
-      <h1 className="text-2xl font-bold mb-4">感謝您的訂購11</h1>
+      <h1 className="text-2xl font-bold mb-4">感謝您的訂購</h1>
 
       {orderInfo ? (
         <div className="bg-gray-100 p-6 rounded space-y-2">

@@ -1,30 +1,24 @@
 // /pages/api/fetch-order.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import axios from "axios";
-import https from "https"; // ★★★ 必須引入這個
+import https from "https"; // ★★★ 新增這個
 
 const WC_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
-// 建議之後改成 process.env，目前先照你的寫死
 const CONSUMER_KEY = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
 const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
 type QrcodeInfo = { name: string; src: string };
 
-// ★★★ 關鍵修復：建立忽略 SSL 錯誤的 Agent ★★★
-const agent = new https.Agent({
-  rejectUnauthorized: false,
-});
+// ★★★ 關鍵修復 1：忽略 SSL 錯誤 (解決 Vercel 上憑證不信任問題) ★★★
+const agent = new https.Agent({ rejectUnauthorized: false });
 
-// ★★★ 定義共用的 Axios 設定 (包含 SSL Agent 與 User-Agent) ★★★
+// ★★★ 關鍵修復 2：偽裝成瀏覽器 (解決 Cloudflare 阻擋問題) ★★★
 const axiosConfig = {
   httpsAgent: agent,
+  auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
   headers: {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Content-Type": "application/json"
-  },
-  auth: {
-    username: CONSUMER_KEY,
-    password: CONSUMER_SECRET,
   }
 };
 
@@ -112,9 +106,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   orderNo = orderNo.replace(/[&/\\]/g, "-");
 
   try {
-    // 1) 用 meta 找訂單 (套用 axiosConfig 以解決 SSL 問題)
+    console.log(`Searching Order: ${orderNo}`);
+
+    // 1) 找訂單 (這裡使用了我們加強過的 axiosConfig)
     const { data: orders } = await axios.get(WC_API_URL, {
-      ...axiosConfig, // <--- 這裡加入了 SSL fix
+      ...axiosConfig, // ★★★ 注入設定
       params: { per_page: 50, order: "desc", orderby: "date" },
     });
 
@@ -123,7 +119,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     );
     if (!orderLite) return res.status(404).json({ error: "找不到訂單" });
 
-    // 2) 取詳情 (套用 axiosConfig)
+    // 2) 取詳情 (同樣注入設定)
     const { data: fullOrder } = await axios.get(`${WC_API_URL}/${orderLite.id}`, axiosConfig);
 
     const meta: any[] = fullOrder?.meta_data || [];
@@ -140,9 +136,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 2.2 備援：拼湊
     if (!offsiteInfo) {
-      const PaymentType =
-        meta.find((m) => m?.key === "newebpay_payment_type")?.value ||
-        (fullOrder?.payment_method_title || "").toUpperCase();
+      const PaymentType = meta.find((m) => m?.key === "newebpay_payment_type")?.value || (fullOrder?.payment_method_title || "").toUpperCase();
       const CodeNo = meta.find((m) => m?.key === "newebpay_code_no")?.value || "";
       const BankCode = meta.find((m) => m?.key === "newebpay_bank_code")?.value || "";
       const ExpireDate = meta.find((m) => m?.key === "newebpay_expire_date")?.value || "";
@@ -163,11 +157,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // 2.3 最後備援：讀 notes (套用 axiosConfig)
+    // 2.3 最後備援：讀 notes
     if (!offsiteInfo) {
       try {
         const { data: notes } = await axios.get(`${WC_API_URL}/${orderLite.id}/notes`, {
-            ...axiosConfig, // <--- SSL fix
+            ...axiosConfig, // ★★★ 注入設定
             params: { per_page: 20, order: "desc" }
         });
         const hit = (notes || []).find(
@@ -187,15 +181,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // ====== 狀態 ======
     const isPaid = computeIsPaid(fullOrder);
     const paymentStatusLabel = statusLabel(fullOrder);
-    const paymentType =
-      meta.find((m) => m?.key === "newebpay_payment_type")?.value ||
-      fullOrder?.payment_method_title || "";
-    const payTime =
-      meta.find((m) => m?.key === "newebpay_pay_time")?.value ||
-      fullOrder?.date_paid || "";
-    const tradeNo =
-      meta.find((m) => m?.key === "newebpay_trade_no")?.value ||
-      fullOrder?.transaction_id || "";
+    const paymentType = meta.find((m) => m?.key === "newebpay_payment_type")?.value || fullOrder?.payment_method_title || "";
+    const payTime = meta.find((m) => m?.key === "newebpay_pay_time")?.value || fullOrder?.date_paid || "";
+    const tradeNo = meta.find((m) => m?.key === "newebpay_trade_no")?.value || fullOrder?.transaction_id || "";
 
     const orderInfo = {
       status: paymentStatusLabel,
@@ -224,7 +212,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       } catch {}
     }
-    // 舊版單一 QRCode 支援
     if (!qrcodes.length) {
       const single = meta.find((m: any) => m?.key === "esim_qrcode")?.value;
       const qtyStr = meta.find((m: any) => m?.key === "esim_quantity")?.value;
@@ -236,7 +223,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       }
     }
-    // Line items fallback
     if (!qrcodes.length && Array.isArray(lineItems)) {
       const fromItems: QrcodeInfo[] = [];
       for (const li of lineItems) {
@@ -272,7 +258,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       message: qrcodes.length ? undefined : "尚未找到任何 eSIM QRCode，請稍後再試或聯繫客服。",
     });
   } catch (err: any) {
-    console.error("❌ WooCommerce 查詢失敗:", err?.response?.data || err.message);
-    return res.status(500).json({ error: "WooCommerce 查詢失敗", details: err?.response?.data || err.message });
+    const msg = err.code === 'ECONNABORTED' ? 'Cloudflare Blocked Request (Timeout)' : err.message;
+    console.error("❌ WooCommerce 查詢失敗:", msg);
+    return res.status(500).json({ error: "WooCommerce 查詢失敗", details: msg });
   }
 }
