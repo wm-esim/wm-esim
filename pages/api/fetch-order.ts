@@ -1,12 +1,32 @@
 // /pages/api/fetch-order.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import axios from "axios";
+import https from "https"; // ★★★ 必須引入這個
 
 const WC_API_URL = "https://fegoesim.com/wp-json/wc/v3/orders";
+// 建議之後改成 process.env，目前先照你的寫死
 const CONSUMER_KEY = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
 const CONSUMER_SECRET = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
 type QrcodeInfo = { name: string; src: string };
+
+// ★★★ 關鍵修復：建立忽略 SSL 錯誤的 Agent ★★★
+const agent = new https.Agent({
+  rejectUnauthorized: false,
+});
+
+// ★★★ 定義共用的 Axios 設定 (包含 SSL Agent 與 User-Agent) ★★★
+const axiosConfig = {
+  httpsAgent: agent,
+  headers: {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Content-Type": "application/json"
+  },
+  auth: {
+    username: CONSUMER_KEY,
+    password: CONSUMER_SECRET,
+  }
+};
 
 function normalizeSrc(raw: any): string {
   const str = String(raw || "");
@@ -48,18 +68,8 @@ function statusLabel(order: any): string {
   }
 }
 
-/** 從訂單備註（我們在 notify 裡寫的）解析出 offsite 取號資訊 */
+/** 從訂單備註解析 offsite 取號資訊 */
 function parseOffsiteFromNote(note: string) {
-  // 範例（notify 寫入）：
-  // 🔔 藍新金流 取號成功（VACC）
-  // 銀行代碼：812
-  // 轉帳帳號 / 繳費代碼：12345678901234
-  // 超商別：7-11
-  // 應繳金額：NT$ 299
-  // 繳費期限：2025/09/20 23:59
-  // 交易序號：12345678
-  // 商店訂單號：ORDER123
-
   const get = (label: string) => {
     const re = new RegExp(`^${label}\\s*[:：]\\s*(.+)$`, "m");
     const m = note.match(re);
@@ -102,9 +112,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   orderNo = orderNo.replace(/[&/\\]/g, "-");
 
   try {
-    // 1) 用我們自訂 meta：newebpay_order_no 找訂單
+    // 1) 用 meta 找訂單 (套用 axiosConfig 以解決 SSL 問題)
     const { data: orders } = await axios.get(WC_API_URL, {
-      auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
+      ...axiosConfig, // <--- 這裡加入了 SSL fix
       params: { per_page: 50, order: "desc", orderby: "date" },
     });
 
@@ -113,15 +123,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     );
     if (!orderLite) return res.status(404).json({ error: "找不到訂單" });
 
-    // 2) 取詳情
-    const { data: fullOrder } = await axios.get(`${WC_API_URL}/${orderLite.id}`, {
-      auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
-    });
+    // 2) 取詳情 (套用 axiosConfig)
+    const { data: fullOrder } = await axios.get(`${WC_API_URL}/${orderLite.id}`, axiosConfig);
 
     const meta: any[] = fullOrder?.meta_data || [];
     const lineItems: any[] = fullOrder?.line_items || [];
 
-    // ====== 取號/代碼資料（ATM/超商/WebATM） ======
+    // ====== 取號/代碼資料 ======
     let offsiteInfo: any = null;
 
     // 2.1 首選：整包 JSON
@@ -130,25 +138,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       try { offsiteInfo = typeof rawOffsite === "string" ? JSON.parse(rawOffsite) : rawOffsite; } catch {}
     }
 
-    // 2.2 備援：用拆散欄位拼回
+    // 2.2 備援：拼湊
     if (!offsiteInfo) {
       const PaymentType =
         meta.find((m) => m?.key === "newebpay_payment_type")?.value ||
         (fullOrder?.payment_method_title || "").toUpperCase();
-
-      const CodeNo =
-        meta.find((m) => m?.key === "newebpay_code_no")?.value || "";
-
-      const BankCode =
-        meta.find((m) => m?.key === "newebpay_bank_code")?.value || "";
-
-      const ExpireDate =
-        meta.find((m) => m?.key === "newebpay_expire_date")?.value || "";
-
-      const TradeNo =
-        meta.find((m) => m?.key === "newebpay_trade_no")?.value ||
-        fullOrder?.transaction_id || "";
-
+      const CodeNo = meta.find((m) => m?.key === "newebpay_code_no")?.value || "";
+      const BankCode = meta.find((m) => m?.key === "newebpay_bank_code")?.value || "";
+      const ExpireDate = meta.find((m) => m?.key === "newebpay_expire_date")?.value || "";
+      const TradeNo = meta.find((m) => m?.key === "newebpay_trade_no")?.value || fullOrder?.transaction_id || "";
       const Amt = fullOrder?.total;
 
       if (PaymentType && (CodeNo || BankCode || ExpireDate || TradeNo)) {
@@ -165,12 +163,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // 2.3 最後備援：讀訂單備註（notify 有寫一則「取號成功」）
+    // 2.3 最後備援：讀 notes (套用 axiosConfig)
     if (!offsiteInfo) {
       try {
         const { data: notes } = await axios.get(`${WC_API_URL}/${orderLite.id}/notes`, {
-          auth: { username: CONSUMER_KEY, password: CONSUMER_SECRET },
-          params: { per_page: 20, order: "desc" },
+            ...axiosConfig, // <--- SSL fix
+            params: { per_page: 20, order: "desc" }
         });
         const hit = (notes || []).find(
           (n: any) =>
@@ -186,17 +184,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // ====== 付款狀態、其他欄位 ======
+    // ====== 狀態 ======
     const isPaid = computeIsPaid(fullOrder);
     const paymentStatusLabel = statusLabel(fullOrder);
     const paymentType =
       meta.find((m) => m?.key === "newebpay_payment_type")?.value ||
       fullOrder?.payment_method_title || "";
-
     const payTime =
       meta.find((m) => m?.key === "newebpay_pay_time")?.value ||
       fullOrder?.date_paid || "";
-
     const tradeNo =
       meta.find((m) => m?.key === "newebpay_trade_no")?.value ||
       fullOrder?.transaction_id || "";
@@ -211,7 +207,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       wooStatus: String(fullOrder?.status || ""),
     };
 
-    // ====== eSIM QRCodes（維持你的邏輯） ======
+    // ====== eSIM QRCodes ======
     let qrcodes: QrcodeInfo[] = [];
     const multi = meta.find((m: any) => m?.key === "esim_qrcodes")?.value;
     if (multi) {
@@ -228,6 +224,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       } catch {}
     }
+    // 舊版單一 QRCode 支援
     if (!qrcodes.length) {
       const single = meta.find((m: any) => m?.key === "esim_qrcode")?.value;
       const qtyStr = meta.find((m: any) => m?.key === "esim_quantity")?.value;
@@ -239,6 +236,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       }
     }
+    // Line items fallback
     if (!qrcodes.length && Array.isArray(lineItems)) {
       const fromItems: QrcodeInfo[] = [];
       for (const li of lineItems) {
