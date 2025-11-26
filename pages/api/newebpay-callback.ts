@@ -4,9 +4,19 @@ import type { IncomingMessage } from "http";
 import crypto from "crypto";
 import qs from "qs";
 
-// 既然 Notify 成功了，我們就只鎖定這組正確的金鑰
-const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
-const HASH_IV  = "PKetlaZYZcZvlMmC";
+// 定義金鑰組
+const KEY_SETS = [
+  {
+    key: "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx",
+    iv:  "PKetlaZYZcZvlMmC",
+    name: "Hardcoded-MS3788"
+  },
+  {
+    key: "pwFHCqoQZGmho4w6",
+    iv:  "EkRm7iFT261dpevs",
+    name: "Env-3002607"
+  }
+];
 
 export const config = { api: { bodyParser: false } };
 
@@ -24,25 +34,73 @@ function sha(encrypted: string, key: string, iv: string) {
   return crypto.createHash("sha256").update(s).digest("hex").toUpperCase();
 }
 
+// ★★★ 關鍵修復：手動處理 Padding，解決 bad_decrypt 問題 ★★★
+function decryptWithManualPadding(encrypted: string, key: string, iv: string) {
+  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), Buffer.from(iv));
+  
+  // 1. 關閉自動 Padding (這是解決 1C800064 的關鍵)
+  decipher.setAutoPadding(false);
+  
+  // 2. 解密
+  let text = decipher.update(encrypted, "hex", "utf8");
+  text += decipher.final("utf8");
+
+  // 3. 手動移除 PKCS7 Padding
+  // 取得最後一個字元的 char code
+  const lastChar = text.charCodeAt(text.length - 1);
+  
+  // PKCS7 Padding 的特徵：最後一個 byte 的值，代表 padding 的長度 (通常在 1~32 之間)
+  if (lastChar > 0 && lastChar <= 32) {
+    // 檢查結尾是否真的都是這個值 (雙重確認)
+    const padding = text.slice(-lastChar);
+    if (padding.split('').every(c => c.charCodeAt(0) === lastChar)) {
+      return text.slice(0, -lastChar); // 移除 padding
+    }
+  }
+  
+  // 如果看起來不像 padding，就回傳原文 (有些特殊情況可能沒有 padding)
+  return text.replace(/[\x00-\x1F\x7F-\x9F]/g, ""); 
+}
+
 function decryptTradeInfo(ti: string, key: string, iv: string): string {
-  // 嘗試基本修復
-  const clean = ti.replace(/\s/g, "+");
-  const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), Buffer.from(iv));
-  d.setAutoPadding(true);
-  let out = d.update(clean, "hex", "utf8");
-  out += d.final("utf8");
-  return out;
+  // 嘗試多種輸入格式
+  const candidates = [
+    ti,
+    ti.replace(/\s/g, "+"), // 補回被吃掉的加號
+    decodeURIComponent(ti),
+    decodeURIComponent(ti).replace(/\s/g, "+")
+  ];
+
+  for (const c of candidates) {
+    try {
+      // 嘗試用標準方法解
+      const d = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), Buffer.from(iv));
+      d.setAutoPadding(true);
+      let out = d.update(c, "hex", "utf8");
+      out += d.final("utf8");
+      if (out.includes("{") || out.includes("=")) return out;
+    } catch (e) {
+      // 標準方法失敗，改用手動 Padding 方法
+      try {
+        const out = decryptWithManualPadding(c, key, iv);
+        if (out.includes("{") || out.includes("=")) return out;
+      } catch (e2) {}
+    }
+  }
+  throw new Error("Unable to decrypt with any method");
 }
 
 function parseDecrypted(text: string): any {
+  // 清理可能殘留的控制字元
+  const clean = text.replace(/[\x00-\x1F\x7F-\x9F]/g, "");
   try {
-    const obj = JSON.parse(text);
+    const obj = JSON.parse(clean);
     if (obj && typeof obj.Result === "string") {
       try { obj.Result = JSON.parse(obj.Result); } catch { obj.Result = qs.parse(obj.Result); }
     }
     return obj;
   } catch {
-    const r: any = qs.parse(text);
+    const r: any = qs.parse(clean);
     if (r?.Result && typeof r.Result === "string") {
       try { r.Result = JSON.parse(r.Result); } catch { r.Result = qs.parse(r.Result); }
     }
@@ -67,41 +125,68 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     };
 
     const TI_raw = getRawParam("TradeInfo") || String(body?.TradeInfo || "");
-    
-    // 嘗試解密
-    let orderNo = "";
-    let nextStatus = "success"; // 預設給成功，因為 Notify 通常會處理好狀態
+    const TS_raw = getRawParam("TradeSha") || String(body?.TradeSha || "");
 
-    try {
-      if (TI_raw) {
-        // 嘗試 URL Decode 之後再解
-        let candidate = TI_raw;
-        if (TI_raw.includes("%")) {
-            try { candidate = decodeURIComponent(TI_raw); } catch {}
-        }
-        
-        const plain = decryptTradeInfo(candidate, HASH_KEY, HASH_IV);
-        const payload = parseDecrypted(plain);
-        const result = payload?.Result || {};
-        orderNo = result?.MerchantOrderNo || body?.MerchantOrderNo || "";
-      }
-    } catch (e) {
-      console.error("Callback 解密失敗，啟用前端備援機制:", e);
-      // ★★★ 關鍵點：如果解密失敗，不跳 Error，而是跳轉到前端並告訴它「去讀 LocalStorage」 ★★★
-      return res.redirect(302, `/thank-you?status=success&orderNo=LOCAL_BACKUP`);
+    if (!TI_raw || !TS_raw) {
+      return res.redirect(302, `/thank-you?status=error&msg=MissingParams`);
     }
+
+    // SHA 驗證
+    let validKeySet = null;
+    let TradeInfoCandidate = "";
+
+    // 準備候選人
+    const tiCandidates = [
+        TI_raw,
+        decodeURIComponent(TI_raw),
+        TI_raw.replace(/\s/g, "+"),
+        decodeURIComponent(TI_raw).replace(/\s/g, "+")
+    ];
+    const uniqueCandidates = Array.from(new Set(tiCandidates));
+
+    for (const set of KEY_SETS) {
+      for (const cand of uniqueCandidates) {
+        if (sha(cand, set.key, set.iv) === TS_raw) {
+          validKeySet = set;
+          TradeInfoCandidate = cand;
+          break;
+        }
+      }
+      if (validKeySet) break;
+    }
+
+    if (!validKeySet || !TradeInfoCandidate) {
+      console.error("SHA 驗證失敗");
+      return res.redirect(302, `/thank-you?status=error&msg=ShaMismatch`);
+    }
+
+    // 解密
+    let payload: any = {};
+    try {
+      const plain = decryptTradeInfo(TradeInfoCandidate, validKeySet.key, validKeySet.iv);
+      payload = parseDecrypted(plain) || {};
+    } catch (e: any) {
+      console.error("解密失敗:", e);
+      return res.redirect(302, `/thank-you?status=error&msg=DecryptFail`);
+    }
+
+    const result = payload?.Result || {};
+    const orderNo = result?.MerchantOrderNo || body?.MerchantOrderNo || "";
 
     if (!orderNo) {
-       // 如果解開了但沒單號，也啟用備援
-       return res.redirect(302, `/thank-you?status=success&orderNo=LOCAL_BACKUP`);
+      return res.redirect(302, `/thank-you?status=error&msg=NoOrderNo`);
     }
 
-    // 正常解開的情況
-    return res.redirect(302, `/thank-you?status=success&orderNo=${orderNo}`);
+    // 成功！
+    const qsExtra = new URLSearchParams({
+      orderNo,
+      status: "success", // 這裡直接給 success，因為 Notify 已經處理好訂單狀態了
+    }).toString();
+
+    return res.redirect(302, `/thank-you?${qsExtra}`);
 
   } catch (e: any) {
-    // 發生嚴重錯誤時，也嘗試啟用備援
     console.error("Callback Fatal Error", e);
-    return res.redirect(302, `/thank-you?status=success&orderNo=LOCAL_BACKUP`);
+    return res.redirect(302, `/thank-you?status=error&msg=${encodeURIComponent(e.message)}`);
   }
 }
