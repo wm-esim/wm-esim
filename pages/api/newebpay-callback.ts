@@ -4,9 +4,9 @@ import type { IncomingMessage } from "http";
 import crypto from "crypto";
 import qs from "qs";
 
-/** 建議改 .env；此處沿用你的現值 */
-const HASH_KEY = "OVB4Xd2HgieiLJJcj5RMx9W94sMKgHQx";
-const HASH_IV  = "PKetlaZYZcZvlMmC";
+// ★★★ 修正點 1：改用環境變數，確保跟 generate-form 用同一組金鑰 ★★★
+const HASH_KEY = process.env.HASH_KEY || process.env.NEXT_PUBLIC_HASH_KEY || "";
+const HASH_IV = process.env.HASH_IV || process.env.NEXT_PUBLIC_HASH_IV || "";
 
 /** ========== helpers ========== */
 export const config = { api: { bodyParser: false } };
@@ -27,6 +27,8 @@ function sha(encrypted: string, key: string, iv: string) {
 
 /** 先試 hex；失敗再試 base64（會做 +/空白 正規化） */
 function decryptTradeInfo(ti: string, key: string, iv: string): string {
+  if (!key || !iv) throw new Error("缺少 HashKey 或 HashIV 設定");
+
   const tryHex = () => {
     const d = crypto.createDecipheriv(
       "aes-256-cbc",
@@ -123,7 +125,7 @@ function isOffsitePending(result: any) {
 
 /** ========== handler ========== */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  // 若被誤以 GET 方式存取，不要導去 error，直接結束即可（避免 ThankYou 拿不到 orderNo）
+  // 若被誤以 GET 方式存取，不要導去 error，直接結束即可
   if (req.method !== "POST") {
     return res.status(200).send("OK");
   }
@@ -132,7 +134,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const raw = await readBody(req);
     const ct = String(req.headers["content-type"] || "");
 
-    // 只為了讀取非加密欄位可解析，但 TI/TS 儘量從 raw 取，避免 + 被還原成空白
     const body: any = ct.includes("application/json")
       ? JSON.parse(raw || "{}")
       : qs.parse(raw);
@@ -145,15 +146,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return (amp === -1 ? raw.slice(s) : raw.slice(s, amp)).trim();
     };
 
-    // 優先 raw，其次 body
     const TI_raw = getRawParam("TradeInfo") || String(body?.TradeInfo || "");
     const TS_raw = getRawParam("TradeSha") || String(body?.TradeSha || "");
 
+    // ★★★ 修正點 2：錯誤時帶上 msg 參數以便除錯 ★★★
     if (!TI_raw || !TS_raw) {
-      return res.redirect(302, `/thank-you?status=error`);
+      console.error("缺少 TradeInfo 或 TradeSha");
+      return res.redirect(302, `/thank-you?status=error&msg=MissingParams`);
     }
 
-    // 產候選，找出 SHA 能過的一個
+    // SHA 驗證
     const tiCandidates = (() => {
       const out: string[] = [];
       const hasPct = /%[0-9a-fA-F]{2}/.test(TI_raw);
@@ -176,8 +178,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         break;
       }
     }
+    
+    // 如果驗證失敗，通常代表 KEY/IV 錯了
     if (!TradeInfo) {
-      return res.redirect(302, `/thank-you?status=error`);
+      console.error(`SHA Mismatch! ServerKey: ${HASH_KEY?.slice(0,4)}...`);
+      return res.redirect(302, `/thank-you?status=error&msg=ShaMismatch`);
     }
 
     // 解密 + 解析
@@ -185,11 +190,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     try {
       const plain = decryptTradeInfo(TradeInfo, HASH_KEY, HASH_IV);
       payload = parseDecrypted(plain) || {};
-    } catch {
-      return res.redirect(302, `/thank-you?status=error`);
+    } catch (e: any) {
+      console.error("解密失敗", e);
+      return res.redirect(302, `/thank-you?status=error&msg=DecryptFail`);
     }
 
-    // ⚠️ 信用卡流程常見：Status 不在解密後 payload，而在外層 body
     const status =
       (payload?.Status as string | undefined) ||
       (body?.Status as string | undefined) ||
@@ -204,15 +209,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       "";
 
     if (!orderNo) {
-      return res.redirect(302, `/thank-you?status=error`);
+      return res.redirect(302, `/thank-you?status=error&msg=NoOrderNo`);
     }
 
-    // 只決定導向狀態；**不**做任何後端 fulfill（避免和 notify 重覆）
     let nextStatus = "fail";
     if (isPaid(result, status)) nextStatus = "success";
     else if (isOffsitePending(result)) nextStatus = "pending";
 
-    // 把已知欄位帶回前端
     const qsExtra = new URLSearchParams({
       orderNo,
       status: nextStatus,
@@ -221,8 +224,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       tradeNo: String(result?.TradeNo || ""),
     }).toString();
 
+    // 成功！帶回 orderNo
     return res.redirect(302, `/thank-you?${qsExtra}`);
-  } catch {
-    return res.redirect(302, `/thank-you?status=error`);
+
+  } catch (e: any) {
+    console.error("Callback 發生未知錯誤", e);
+    return res.redirect(302, `/thank-you?status=error&msg=${encodeURIComponent(e.message)}`);
   }
 }
