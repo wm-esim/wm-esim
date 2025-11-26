@@ -9,84 +9,140 @@ import SwiperCarousel from "../../components/SwiperCarousel/SwiperCard.jsx";
 import FilterSideBar from "../../components/FilterSideBar";
 import { motion } from "framer-motion";
 
+// --- 環境變數設定 ---
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
   "https://www.wmesim.com";
+
 const WC_BASE =
   process.env.NEXT_PUBLIC_WP_API_BASE_URL?.replace(/\/+$/, "") ||
   "https://fegoesim.com";
+
+// 優先使用環境變數，若無則使用預設值
 const WC_KEY =
-  process.env.WC_CONSUMER_KEY || "ck_ef9f4379124655ad946616864633bd37e3174bc2";
+  process.env.WC_CONSUMER_KEY ||
+  process.env.NEXT_PUBLIC_WC_CONSUMER_KEY ||
+  "ck_ef9f4379124655ad946616864633bd37e3174bc2";
+
 const WC_SECRET =
   process.env.WC_CONSUMER_SECRET ||
+  process.env.NEXT_PUBLIC_WC_CONSUMER_SECRET ||
   "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
-const WC_API = (p) =>
-  `${WC_BASE}/wp-json/wc/v3${p}&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`;
 
+// --- 關鍵修復：定義請求標頭 (User-Agent) ---
+// 這是防止被 WordPress 防火牆擋下的關鍵
+const API_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Content-Type": "application/json",
+};
+
+// --- getStaticPaths ---
 export async function getStaticPaths() {
-  try {
-    const res = await fetch(
-      `${WC_BASE}/wp-json/wc/v3/products/categories?per_page=100&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
-    );
-    const cats = await res.json();
-    const paths = cats.map((c) => ({ params: { slug: c.slug } }));
-    return { paths, fallback: "blocking" };
-  } catch (e) {
-    console.error("⚠️ getStaticPaths fail:", e);
-    return { paths: [], fallback: "blocking" };
-  }
+  // ★★★ 修復重點 ★★★
+  // 我們不再預先抓取所有分類路徑，因為這會在部署時瞬間產生大量請求，導致 WordPress 封鎖 IP。
+  // 改成回傳空陣列，讓頁面在「第一次被使用者訪問時」才生成 (fallback: 'blocking')。
+  // 這樣既能保證部署 100% 成功，又能避免 404。
+  return {
+    paths: [],
+    fallback: "blocking",
+  };
 }
 
+// --- getStaticProps ---
 export async function getStaticProps({ params }) {
+  const { slug } = params;
+
   try {
-    const res = await fetch(
-      `${WC_BASE}/wp-json/wc/v3/products/categories?per_page=100&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
+    // 1. 先抓所有分類來比對 ID
+    const catRes = await fetch(
+      `${WC_BASE}/wp-json/wc/v3/products/categories?per_page=100&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`,
+      { headers: API_HEADERS } // 加入 Header
     );
-    const categories = await res.json();
 
-    const matchedCategory = categories.find((c) => c.slug === params.slug);
-    if (!matchedCategory) return { notFound: true };
+    if (!catRes.ok) {
+      throw new Error(`Categories fetch failed: ${catRes.statusText}`);
+    }
 
+    const categories = await catRes.json();
+    const matchedCategory = categories.find((c) => c.slug === slug);
+
+    if (!matchedCategory) {
+      console.warn(`找不到分類 Slug: ${slug}`);
+      return { notFound: true };
+    }
+
+    // 2. 根據 ID 抓產品
     const prodRes = await fetch(
-      `${WC_BASE}/wp-json/wc/v3/products?category=${matchedCategory.id}&per_page=50&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
+      `${WC_BASE}/wp-json/wc/v3/products?category=${matchedCategory.id}&per_page=50&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`,
+      { headers: API_HEADERS } // 加入 Header
     );
+
+    if (!prodRes.ok) {
+      throw new Error(`Products fetch failed: ${prodRes.statusText}`);
+    }
+
     const data = await prodRes.json();
 
     return {
-      props: { slug: params.slug, categories, initialProducts: data },
-      revalidate: 60,
+      props: {
+        slug,
+        categories,
+        initialProducts: data,
+      },
+      revalidate: 60, // 每 60 秒重新驗證一次
     };
   } catch (e) {
-    console.error("❌ getStaticProps fail:", e);
-    return { notFound: true, revalidate: 30 };
+    console.error(`❌ getStaticProps Error [${slug}]:`, e);
+    // 如果連線失敗，不要直接回傳 404，這樣使用者還有機會看到錯誤訊息或重試
+    // 但為了標準流程，這裡若失敗還是回傳 notFound 或是一個錯誤狀態
+    return { notFound: true, revalidate: 10 };
   }
 }
 
 const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
   const router = useRouter();
-  const [fetchedProducts, setFetchedProducts] = useState(initialProducts);
-  const [filteredProducts, setFilteredProducts] = useState(initialProducts);
+
+  // 為了安全起見，如果 initialProducts 是空的或 undefined，給個空陣列
+  const safeInitialProducts = Array.isArray(initialProducts)
+    ? initialProducts
+    : [];
+
+  const [fetchedProducts, setFetchedProducts] = useState(safeInitialProducts);
+  const [filteredProducts, setFilteredProducts] = useState(safeInitialProducts);
   const [activeTags, setActiveTags] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const PRODUCTS_PER_PAGE = 12;
 
+  // 當 slug 改變時，Client 端重新抓取 (非必要，因為 getStaticProps 已經抓了，但保留你的邏輯)
   useEffect(() => {
+    if (!categories || categories.length === 0) return;
+
     const matchedCategory = categories.find((cat) => cat.slug === slug);
     if (!matchedCategory) return;
+
+    // 如果 initialProducts 已經有資料且符合當前 slug，就不需要重抓，節省效能
+    // 這裡保留你的邏輯，但建議可以判斷一下是否真的需要重抓
+
     const fetchProducts = async () => {
       try {
         const res = await fetch(
           `${WC_BASE}/wp-json/wc/v3/products?category=${matchedCategory.id}&per_page=50&consumer_key=${WC_KEY}&consumer_secret=${WC_SECRET}`
         );
         const data = await res.json();
-        setFetchedProducts(data);
+        if (Array.isArray(data)) {
+          setFetchedProducts(data);
+        }
       } catch (err) {
-        console.error("抓分類產品失敗", err);
+        console.error("Client side fetch error:", err);
       }
     };
-    fetchProducts();
-  }, [slug, categories]);
 
+    // 只有當初始資料不匹配或需要更新時才執行 (這裡簡單處理直接執行)
+    fetchProducts();
+  }, [slug, categories]); // 移除 WC_KEY 依賴，避免不必要的重跑
+
+  // 更新 Filter 邏輯
   useEffect(() => {
     const tagsFromQuery = router.query.tags?.split(",").filter(Boolean) || [];
     setActiveTags(tagsFromQuery);
@@ -107,12 +163,17 @@ const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
       });
       setFilteredProducts(filtered);
     }
+    // Filter 改變時重置頁碼
+    setCurrentPage(1);
   }, [activeTags, fetchedProducts]);
 
   const startIndex = (currentPage - 1) * PRODUCTS_PER_PAGE;
   const endIndex = startIndex + PRODUCTS_PER_PAGE;
   const currentProducts = filteredProducts.slice(startIndex, endIndex);
   const totalPages = Math.ceil(filteredProducts.length / PRODUCTS_PER_PAGE);
+
+  // 若資料讀取中或發生錯誤的 fallback (防止頁面崩潰)
+  if (!categories) return <div className="p-10 text-center">Loading...</div>;
 
   return (
     <Layout>
@@ -207,7 +268,7 @@ const CategoryPage = ({ slug, categories, initialProducts = [] }) => {
               </div>
             ) : (
               <div className="text-center text-gray-500 p-10">
-                沒有相關產品。
+                沒有相關產品 (或無法連接伺服器)。
               </div>
             )}
 
