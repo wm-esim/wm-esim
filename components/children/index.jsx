@@ -3,7 +3,7 @@ import Image from "next/image";
 
 // API 請求的 URL
 const API_URL =
-  "https://starislandbaby.com/test/wp-json/wc/v3/products/categories?consumer_key=ck_ec41b174efc5977249ffb5ef854f6c1fdba1844b&consumer_secret=cs_d6c8d7ba3031b522ca93e6ee7fb56397b8781d1f&per_page=100";
+  "https://starislandbaby.com/test/wp-json/wc/v3/products/categories?consumer_key=ck_ef9f4379124655ad946616864633bd37e3174bc2&consumer_secret=cs_3da596e08887d9c7ccbf8ee15213f83866c160d4&per_page=100";
 
 // 根據 slug 篩選產品的函數
 const filterProductsByCategory = (categories, products) => {
@@ -25,7 +25,7 @@ export async function getStaticProps() {
 
     // 獲取所有產品資料
     const productsRes = await fetch(
-      "https://starislandbaby.com/test/wp-json/wc/v3/products?consumer_key=ck_ec41b174efc5977249ffb5ef854f6c1fdba1844b&consumer_secret=cs_d6c8d7ba3031b522ca93e6ee7fb56397b8781d1f&per_page=100"
+      "https://starislandbaby.com/test/wp-json/wc/v3/products?consumer_key=ck_ef9f4379124655ad946616864633bd37e3174bc2&consumer_secret=cs_3da596e08887d9c7ccbf8ee15213f83866c160d4&per_page=100"
     );
     const products = await productsRes.json();
 

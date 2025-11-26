@@ -9,8 +9,8 @@ const fetchCategories = async () => {
   let allCategories = [];
   let page = 1;
   const perPage = 100;
-  const consumerKey = "ck_ec41b174efc5977249ffb5ef854f6c1fdba1844b";
-  const consumerSecret = "cs_d6c8d7ba3031b522ca93e6ee7fb56397b8781d1f";
+  const consumerKey = "ck_ef9f4379124655ad946616864633bd37e3174bc2";
+  const consumerSecret = "cs_3da596e08887d9c7ccbf8ee15213f83866c160d4";
 
   try {
     while (true) {
