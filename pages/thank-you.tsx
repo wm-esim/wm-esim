@@ -56,9 +56,7 @@ export default function ThankYouPage() {
 
     const fetchQrcode = async () => {
       try {
-        const res = await axios.get("/api/fetch-order", {
-          params: { orderNo },
-        });
+        const res = await axios.get("/api/get-qrcode", { params: { orderNo } });
         const { qrcodes, orderInfo } = res.data ?? {};
 
         setOrderInfo(orderInfo || null);
