@@ -28,7 +28,6 @@ export const SlideTabsExample = () => {
     { label: "東南亞", href: "/category/malaysia/" },
     { label: "歐美", href: "/category/america/" },
     { label: "兌換QRcode", href: "/shopee-qrcode" },
-    { label: "旅遊精選", href: "/blog" },
   ];
 
   /* ============== 滾動方向（桌機 navbar 顯示/隱藏） ============== */
